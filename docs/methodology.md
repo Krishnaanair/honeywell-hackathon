@@ -198,12 +198,13 @@ completed real baseline and controlled case, and checks EnergyPlus version,
 weather, period, model-preparation fingerprint, and verified final metrics before
 displaying a comparison. Cumulative curves align on simulated timestamp.
 
-The interim six-slide deck keeps its result frame visibly pending. Its verified
-build accepts a bounded JSON input that names the evaluation baseline and agent
-runs, points to a repository-local comparison artifact, and includes that
-artifact's SHA-256. The builder validates version, period, run identities,
-verification status, metric types/ranges, and checksum before inserting values;
-directional changes are calculated from the supplied absolute values.
+The final six-slide deck accepts a bounded JSON input that names the evaluation
+baseline and agent runs, points to a repository-local comparison artifact, and
+includes that artifact's SHA-256. The builder validates version, period, run
+identities, verification status, metric types/ranges, and checksum before
+inserting values; directional changes are calculated from the supplied absolute
+values. The verified week is shown as a comfort/energy trade-off because the
+agent used more electricity and reached a higher peak.
 
 The source of truth remains the machine-readable EnergyPlus comparison export.
 Dashboard values and presentation copy are views of that evidence, not

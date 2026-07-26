@@ -10,10 +10,11 @@ every decision through an independent deterministic safety layer, and applies
 supported thermostat schedule actuators through PyEnergyPlus.
 
 <!-- BEGIN VERIFIED_EVALUATION_STATUS -->
-> Evidence status: the real actuator proof and one-day closed-loop acceptance
-> test are verified. The representative-week baseline is verified, while its
-> paired agent run is still being evaluated. No representative-week comparison
-> or savings claim is published yet.
+> Evidence status: the actuator proof, one-day closed-loop acceptance test, and
+> matched seven-day EnergyPlus 26.1 comparison are verified. In the configured
+> Chicago week, EcoLoop improved occupied-temperature compliance from 67.77% to
+> 90.31%, but used 10.52% more facility electricity and raised peak demand by
+> 5.32%. The result is a measured comfort/energy trade-off, not a savings claim.
 <!-- END VERIFIED_EVALUATION_STATUS -->
 
 Canonical run identities, measured values, and publication status live in
@@ -57,9 +58,10 @@ The complete callback, protocol, safety, replay, and security design is in
   stdio, local inference, deterministic validation, actuation, and subsequent
   telemetry. Its measured comfort/energy trade-off is reported without turning
   it into a savings claim.
-- **Headline evaluation:** the configured representative week is published only
-  after both matched real runs complete and official totals pass telemetry and
-  provenance checks.
+- **Headline evaluation:** the matched representative week passed official
+  EnergyPlus-output, telemetry, and provenance checks. It found a 22.54
+  percentage-point comfort-compliance gain alongside 10.52% higher electricity,
+  identifying the energy penalty the next control-policy iteration must remove.
 
 ## Quick start
 

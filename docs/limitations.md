@@ -32,6 +32,14 @@ cooling setpoint, and hold duration.
 - Local model quality and latency depend on hardware and the selected
   tool-capable Ollama model. Deterministic validation and fallback reduce the
   control consequence of inference failures but do not improve model quality.
+- In the verified representative week, the current scoring and selection policy
+  improved occupied-temperature compliance but used 10.524% more facility
+  electricity and raised peak demand by 5.315%. Before broader evaluation, the
+  policy needs a stronger energy/demand penalty and multi-period tuning.
+- The verified run recorded safely rejected coordinator requests and
+  post-completion shutdown-race audit noise. No stale or post-completion action
+  reached EnergyPlus, and the shutdown path was subsequently hardened, but
+  production commissioning still requires longer-duration reliability testing.
 - SQLite WAL is appropriate for one local demonstration. Multiple physical sites
   need distributed messaging, durable site identity, clock strategy, and
   operational monitoring.

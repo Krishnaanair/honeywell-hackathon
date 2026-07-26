@@ -82,27 +82,62 @@ as agent savings.
 ## Representative-week status
 
 <!-- BEGIN VERIFIED_EVALUATION_BLOCK -->
-The compatible representative-week baseline
-`baseline-20260726T105124Z-4adce000` is complete and verified at:
+The matched representative-week pair is complete and verified:
 
-- 1126.960494 kWh facility electricity;
-- 461.785494 kWh HVAC electricity;
-- 23.006488 kW peak demand;
-- 32.231% occupied temperature violations;
-- 80.6269 occupied violation degree-hours;
-- 94.615% PMV compliance.
+- baseline: `baseline-20260726T105124Z-4adce000`;
+- agent: `agent-20260726T130255Z-65de6a32`;
+- EnergyPlus: 26.1.0, evaluation period July 15-21;
+- model-preparation fingerprint:
+  `09558397d303ca52813cc7354fd34af8a9ef2d4cd100fe30732c555c89337230`;
+- weather SHA-256:
+  `c7d4efcf93ba316a1d874352e743df5cf137ba5c0e3459eb2dc4b5442d5b7f5c`;
+- comparison SHA-256:
+  `7d9300f5c9c546ff4c239e70235a044b89ab51dfc0951811ee5bf8596f7a028a`.
 
-The paired local-model agent run is in progress. No representative-week savings
-or comparison is published until that run completes and passes the same
-official-output, telemetry, provenance, and compatibility checks.
+| Metric | Baseline | Agent | Measured change |
+| --- | ---: | ---: | ---: |
+| Facility electricity | 1126.960 kWh | 1245.564 kWh | 10.524% higher |
+| HVAC electricity | 461.785 kWh | 580.389 kWh | 25.684% higher |
+| Peak electrical demand | 23.006 kW | 24.229 kW | 5.315% higher |
+| Cost | 135.235 configured currency | 149.468 configured currency | 14.232 higher |
+| Operational carbon | 788.872 kgCO2e | 871.895 kgCO2e | 83.023 kgCO2e higher |
+| Occupied temperature compliance | 67.769% | 90.308% | 22.538 percentage points better |
+| Occupied violation degree-hours | 80.627 | 22.360 | 72.267% lower |
+| PMV compliance | 94.615% | 97.462% | 2.846 percentage points better |
+| Mean PPD | 7.659% | 6.697% | 0.962 percentage points lower |
+
+This configured week produced a comfort gain, not an energy saving. The agent
+used 10.524% more facility electricity and increased peak demand by 5.315%.
+Those unfavorable energy results are retained because the comparison passed all
+publication gates.
+
+The agent recorded 170 decisions and 788 MCP tool calls, with 0 inference
+timeouts, 11 safe fallbacks, 13 invalid attempts, and 24 safety clamps. Mean
+decision latency was 12.367 s and p95 latency was 14.672 s. EnergyPlus completed
+with 0 warnings, 0 severe errors, and 0 fatal errors. The official facility
+total and callback telemetry differed by only
+`2.27e-13 kWh` (`1.83e-14%`), well inside the 2% tolerance. No other fuel was
+reported.
+
+The coordinator audit contains six deduplicated severe records across eight
+occurrences: two safely rejected stale/cached requests during the run and four
+post-completion shutdown-race records. Five post-completion proposals were
+validator-accepted but never applied and therefore could not affect the physical
+simulation or official totals. The shutdown guard was subsequently hardened;
+these records are still disclosed, so the run is not described as error-free.
+
+Schedule replay `replay-20260726T134158Z-8fc97abd` completed without local-model
+inference, applied all 170 recorded actions, produced 672 observations, and
+reported 0 EnergyPlus warnings, severe errors, or fatal errors. Replay facility
+electricity was 1249.180 kWh, 0.290% above the live agent total; it demonstrates
+portable action-sequence reproduction rather than bit-for-bit identity.
 <!-- END VERIFIED_EVALUATION_BLOCK -->
 
-The marked block above is the deterministic publication boundary. Once the
-agent run completes, replace it only from the verified `comparison.json` and the
-two verified final-metrics exports produced by the commands below. Record both
-run IDs and the comparison artifact SHA-256 in the result narrative and
-presentation notes; do not transcribe values from terminal output or dashboard
-screenshots.
+The marked block above is the deterministic publication boundary. It is derived
+from the verified `comparison.json` and two verified final-metrics exports.
+Both run IDs and the comparison artifact SHA-256 are recorded in the result
+narrative and presentation notes; values are not transcribed from terminal
+output or dashboard screenshots.
 
 Run:
 

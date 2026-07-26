@@ -40,13 +40,16 @@ template contains no inherited chart, image, or diagram frame.
 
 ## Slide 5 - Evidence before claims
 
-Until the representative-week pair is verified, the slide states:
+The verified representative-week slide states:
 
 <!-- BEGIN SLIDE_5_EVIDENCE -->
-- Closed-loop smoke: real telemetry -> safe setpoint -> later physical response.
-- Bundle ready: source, tests, dashboard, replay, audit, and reports.
-- Representative-week results: **PENDING VERIFICATION**.
-- Publish only after official-output and matched-run checks pass.
+- Matched week: 1126.960 kWh baseline versus 1245.564 kWh agent,
+  **10.524% higher electricity**.
+- Occupied-temperature compliance: 67.769% versus 90.308%,
+  **22.538 percentage points better**.
+- Peak demand: 23.006 kW versus 24.229 kW, **5.315% higher**.
+- Reliability: 170 decisions, 788 MCP calls, 0 timeouts, 11 fallbacks; official
+  EnergyPlus totals matched telemetry within numerical precision.
 <!-- END SLIDE_5_EVIDENCE -->
 
 The presentation build accepts an optional JSON file conforming to
@@ -60,8 +63,8 @@ the referenced comparison artifact matches its SHA-256 checksum.
   Ollama tool calling.
 - Evidence boundary: Chicago TMY3, one reference heat-pump building, and
   configured PMV assumptions; CO2 is unavailable.
-- Next: verify the matched week, then commission a BACnet/MQTT adapter with
-  site-level safeties.
+- Next: strengthen the energy/demand penalty and tune on additional weather
+  periods, then commission a BACnet/MQTT adapter with site-level safeties.
 
 ## Verified-results insertion contract
 
