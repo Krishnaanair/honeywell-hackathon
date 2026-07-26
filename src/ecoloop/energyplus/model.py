@@ -734,15 +734,16 @@ def _write_json(path: Path, payload: Mapping[str, Any]) -> None:
     path.write_text(
         json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=True) + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
 
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _sha256_model_text(path: Path) -> str:
+    """Hash UTF-8 model text after canonicalizing every line ending to LF."""
+
+    text = path.read_text(encoding="utf-8")
+    canonical = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _portable_repository_path(path: Path) -> str:
@@ -772,7 +773,8 @@ def _portable_provenance_payload(
     )
     return {
         "repository_model": _portable_repository_path(repository_model),
-        "repository_model_sha256": _sha256_file(repository_model),
+        "repository_model_sha256": _sha256_model_text(repository_model),
+        "repository_model_sha256_mode": "utf-8-text-lf-normalized",
         "source_name": provenance.source_name,
         "source_identity": provenance.source_path.name,
         "energyplus_version": provenance.energyplus_version,
@@ -1008,7 +1010,8 @@ def prepare_models(
                 f"EnergyPlus {installation.version}; installation is discovered locally at runtime"
             ),
             "source_model": _portable_repository_path(source_model),
-            "source_model_sha256": _sha256_file(source_model),
+            "source_model_sha256": _sha256_model_text(source_model),
+            "source_model_sha256_mode": "utf-8-text-lf-normalized",
             "baseline": baseline_metadata,
             "agent_ready": agent_metadata,
             "replay_method": (

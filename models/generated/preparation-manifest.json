@@ -62,6 +62,7 @@
     "preferred": "Electricity:Facility"
   },
   "source_model": "models/base/building.idf",
-  "source_model_sha256": "cd8e036e161c514903d9a83d5aeeb6d72396f6173b7f6d742aa2f1dd2978152f",
+  "source_model_sha256": "cd25877a228fca41d8327004316e6046c65a6ef10514e61592710a2fe51b0a02",
+  "source_model_sha256_mode": "utf-8-text-lf-normalized",
   "timestep_minutes": 15
 }

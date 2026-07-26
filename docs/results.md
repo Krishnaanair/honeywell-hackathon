@@ -87,12 +87,15 @@ The matched representative-week pair is complete and verified:
 - baseline: `baseline-20260726T105124Z-4adce000`;
 - agent: `agent-20260726T130255Z-65de6a32`;
 - EnergyPlus: 26.1.0, evaluation period July 15-21;
-- model-preparation fingerprint:
+- executed-run preparation-manifest SHA-256 (historical Windows CRLF bytes):
   `09558397d303ca52813cc7354fd34af8a9ef2d4cd100fe30732c555c89337230`;
+- packaged canonical preparation-manifest SHA-256 (LF JSON with the source IDF
+  hashed after LF line-ending normalization):
+  `4ea4d121f7946e3e89f9b683c677c0c12f4c45633f4833c6571bdd2f316356f3`;
 - weather SHA-256:
   `c7d4efcf93ba316a1d874352e743df5cf137ba5c0e3459eb2dc4b5442d5b7f5c`;
 - comparison SHA-256:
-  `7d9300f5c9c546ff4c239e70235a044b89ab51dfc0951811ee5bf8596f7a028a`.
+  `7fcf6609940d43641b3f53642f3ba46572d716278611dc389571fdace14ec1da`.
 
 | Metric | Baseline | Agent | Measured change |
 | --- | ---: | ---: | ---: |

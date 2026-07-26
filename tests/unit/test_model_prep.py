@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,6 +11,8 @@ from ecoloop.energyplus.model import (
     ModelProvenance,
     SchemaNavigator,
     _portable_provenance_payload,
+    _sha256_model_text,
+    _write_json,
     patch_model,
 )
 from ecoloop.energyplus.replay import replay_actions_from_store
@@ -214,6 +217,31 @@ def test_provenance_serialization_excludes_machine_absolute_paths(
     assert "Users/example" not in serialized
     assert payload["repository_model"] == "building.idf"
     assert len(payload["repository_model_sha256"]) == 64
+
+
+def test_model_text_sha256_is_identical_for_lf_and_crlf(tmp_path: Path) -> None:
+    lf_model = tmp_path / "lf.idf"
+    crlf_model = tmp_path / "crlf.idf"
+    canonical = b"Version,26.1;\nTimestep,4;\n"
+    lf_model.write_bytes(canonical)
+    crlf_model.write_bytes(canonical.replace(b"\n", b"\r\n"))
+
+    assert _sha256_model_text(lf_model) == hashlib.sha256(canonical).hexdigest()
+    assert _sha256_model_text(crlf_model) == _sha256_model_text(lf_model)
+
+
+def test_generated_json_uses_lf_line_endings(tmp_path: Path) -> None:
+    output = tmp_path / "manifest.json"
+
+    _write_json(output, {"source_model": "models/base/building.idf", "verified": True})
+
+    serialized = output.read_bytes()
+    assert serialized.endswith(b"\n")
+    assert b"\r\n" not in serialized
+    assert json.loads(serialized) == {
+        "source_model": "models/base/building.idf",
+        "verified": True,
+    }
 
 
 class _ReplayStore:

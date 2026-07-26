@@ -11,8 +11,9 @@
   `https://github.com/NatLabRockies/EnergyPlus/releases/tag/v26.1.0`
 - Source archive SHA-256:
   `0bb6932d277eed62f996b625f37c533b8c35f9af0c53710d961d8442fc4e70b3`
-- Expanded base-model SHA-256:
-  `cd8e036e161c514903d9a83d5aeeb6d72396f6173b7f6d742aa2f1dd2978152f`
+- Canonical expanded base-model SHA-256 (UTF-8 text with CRLF/CR normalized
+  to LF):
+  `cd25877a228fca41d8327004316e6046c65a6ef10514e61592710a2fe51b0a02`
 - Licence: EnergyPlus licence copied to `ENERGYPLUS_LICENSE.txt`
 
 ## Selection rationale
@@ -41,7 +42,9 @@ The expanded model contains `ZoneControl:Thermostat`,
 `Coil:Heating:DX:SingleSpeed`, `Coil:Cooling:DX:SingleSpeed`, and
 `Coil:Heating:Electric` objects. No fuel coil or boiler object was found in the
 expanded source. Model preparation validates these properties against the
-installed 26.1.0 schema rather than relying only on this description.
+installed 26.1.0 schema rather than relying only on this description. The
+canonical checksum is independent of Git or operating-system line-ending
+conversion and does not alter the IDF text seen by EnergyPlus.
 
 Do not edit this base model in place. `prepare-model` writes controlled variants
 under `models/generated/`.
