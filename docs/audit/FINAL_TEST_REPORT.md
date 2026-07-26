@@ -218,3 +218,27 @@ containing credentials.
 
 No test expectations were lowered, and no real dependency was mocked in any
 end-to-end path.
+
+## 10. Packaging procedure
+
+Executed after all commits, on a clean tracked tree:
+
+1. `python -m ecoloop package-submission` regenerates `submission/`
+   (`ecoloop-source.zip`, `system-architecture.pdf`, `results-report.pdf`,
+   `demo-script.pdf`, `presentation.pdf`, `checksums.txt`,
+   `submission-manifest.json`). The command itself resolves `HEAD` at package
+   time, refuses dirty trees, scans the source archive for credentials, and
+   verifies rendered PDF content.
+2. The upload folder `Honeywell_Hackathon_Submission/` is rebuilt from that
+   fresh output with the prescribed artifact names
+   (`EcoLoop_Demo_Script.pdf`, `EcoLoop_Results_Report.pdf`,
+   `EcoLoop_Source_Code.zip`, `EcoLoop_Submission_Deck.pdf`,
+   `EcoLoop_Submission_Deck.pptx`, `EcoLoop_System_Architecture.pdf`,
+   `checksums.txt`, `submission-manifest.json`), and the outer
+   `Honeywell_Hackathon_Submission.zip` is rebuilt from the folder.
+3. Verification: every SHA-256 in both `checksums.txt` files and both
+   manifests is recomputed from the bytes on disk, the manifest
+   `source_commit` is compared against `git rev-parse HEAD`, and the outer
+   zip entry list is compared against the folder inventory. The verified
+   hashes are recorded in the package manifests themselves, which are the
+   authoritative inventory.
