@@ -384,6 +384,64 @@ def test_finalization_combines_official_telemetry_comfort_and_audit(
 
 
 @pytest.mark.integration
+def test_invalid_action_metric_includes_pre_schema_rejections_once(
+    tmp_path: Path,
+) -> None:
+    store, _, _ = _finalized_pair(tmp_path)
+    with sqlite3.connect(store.path) as connection:
+        connection.row_factory = sqlite3.Row
+        rejected = connection.execute(
+            """
+            SELECT observation_id, action_generation, model, reason_code
+            FROM proposed_actions
+            WHERE run_id = 'agent'
+              AND json_extract(validation_result_json, '$.accepted') = 0
+            """
+        ).fetchone()
+    assert rejected is not None
+    observation_id = int(rejected["observation_id"])
+    store.record_agent_decision(
+        decision_id="agent-safety-rejection-decision",
+        run_id="agent",
+        observation_id=observation_id,
+        model=str(rejected["model"]),
+        latency_ms=120.0,
+        completed=True,
+        action_generation=int(rejected["action_generation"]),
+        reason_code=str(rejected["reason_code"]),
+        fallback_status="invalid_action",
+        timestamp=WALL_TIME,
+    )
+    store.record_agent_decision(
+        decision_id="agent-schema-rejection-decision",
+        run_id="agent",
+        observation_id=observation_id,
+        model="qwen3:8b",
+        latency_ms=130.0,
+        completed=True,
+        action_generation=int(rejected["action_generation"]) + 1,
+        reason_code="energy_optimization",
+        explanation=None,
+        fallback_status="invalid_action",
+        timestamp=WALL_TIME,
+    )
+
+    result = finalize_run(
+        store,
+        "agent",
+        _official_results(
+            tmp_path,
+            "agent",
+            electricity_kwh=90.0,
+            hvac_kwh=50.0,
+        ),
+        timestamp=WALL_TIME,
+    )
+
+    assert result.metrics.invalid_action_count == 2
+
+
+@pytest.mark.integration
 def test_comparison_requires_verified_compatible_runs_and_writes_files(
     tmp_path: Path,
 ) -> None:

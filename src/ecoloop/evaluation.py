@@ -13,6 +13,7 @@ import hashlib
 import json
 import math
 import sqlite3
+from collections import Counter
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -592,7 +593,14 @@ def _audit_summary(
 ) -> _AuditSummary:
     decision_rows = connection.execute(
         """
-        SELECT latency_ms, fallback_status, timeout_count
+        SELECT
+            observation_id,
+            action_generation,
+            model,
+            reason_code,
+            latency_ms,
+            fallback_status,
+            timeout_count
         FROM agent_decisions
         WHERE run_id = ?
         """,
@@ -620,20 +628,18 @@ def _audit_summary(
     )
     proposed_rows = connection.execute(
         """
-        SELECT validation_result_json
+        SELECT
+            observation_id,
+            action_generation,
+            model,
+            reason_code,
+            validation_result_json
         FROM proposed_actions
         WHERE run_id = ?
         """,
         (run_id,),
     ).fetchall()
-    invalid_count = 0
-    for row in proposed_rows:
-        raw = row["validation_result_json"]
-        if raw is None:
-            continue
-        parsed = _parse_json_object(str(raw), "proposed action validation")
-        if parsed.get("accepted") is False:
-            invalid_count += 1
+    invalid_count = _invalid_action_count(decision_rows, proposed_rows)
     clamp_rows = connection.execute(
         "SELECT clamp_details_json FROM applied_actions WHERE run_id = ?",
         (run_id,),
@@ -656,6 +662,45 @@ def _audit_summary(
         fallback_count=fallback_count,
         invalid_action_count=invalid_count,
         safety_clamp_count=clamp_count,
+    )
+
+
+def _invalid_action_count(
+    decision_rows: Sequence[sqlite3.Row],
+    proposed_rows: Sequence[sqlite3.Row],
+) -> int:
+    """Count distinct rejected action attempts across both audit boundaries."""
+
+    rejected_attempts: Counter[tuple[int, int | None, str, str]] = Counter()
+    for row in proposed_rows:
+        raw = row["validation_result_json"]
+        if raw is None:
+            continue
+        parsed = _parse_json_object(str(raw), "proposed action validation")
+        if parsed.get("accepted") is False:
+            rejected_attempts[_action_attempt_key(row)] += 1
+
+    invalid_count = sum(rejected_attempts.values())
+    unmatched_rejections = rejected_attempts.copy()
+    for row in decision_rows:
+        fallback_status = str(row["fallback_status"] or "").strip().casefold()
+        if fallback_status != "invalid_action":
+            continue
+        key = _action_attempt_key(row)
+        if unmatched_rejections[key] > 0:
+            unmatched_rejections[key] -= 1
+        else:
+            invalid_count += 1
+    return invalid_count
+
+
+def _action_attempt_key(row: sqlite3.Row) -> tuple[int, int | None, str, str]:
+    generation = row["action_generation"]
+    return (
+        int(row["observation_id"]),
+        int(generation) if generation is not None else None,
+        str(row["model"] or "").strip().casefold(),
+        str(row["reason_code"] or "").strip().casefold(),
     )
 
 

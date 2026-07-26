@@ -535,7 +535,7 @@ class AgentHost:
         _advance_sequence(sequence, evaluate_request, evaluated)
         sequence.candidate_fingerprints.add(_candidate_fingerprint(candidate))
 
-        generation = _next_generation(actual_state)
+        generation = sequence.next_action_generation or _next_generation(actual_state)
         action = {
             **candidate,
             "action_generation": generation,

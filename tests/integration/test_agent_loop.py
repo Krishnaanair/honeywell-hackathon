@@ -39,6 +39,18 @@ class RejectingApplyClient(DirectFakeMCPClient):
         return await super().call_tool(name, arguments)
 
 
+class StateWithoutActionGenerationClient(DirectFakeMCPClient):
+    """Expose authoritative generation only through the constraint response."""
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        result = await super().call_tool(name, arguments)
+        if name != "get_current_building_state":
+            return result
+        observation = dict(result["observation"])
+        observation.pop("action_generation", None)
+        return {**result, "observation": observation}
+
+
 class StagedSchemaModel:
     """Follow one required tool at a time and record the schemas offered."""
 
@@ -475,6 +487,40 @@ async def test_nearly_identical_state_reuses_candidate_without_inference() -> No
         "evaluate_candidate_actions",
         "apply_control_action",
     ]
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_cached_action_uses_authoritative_advanced_generation() -> None:
+    client = StateWithoutActionGenerationClient()
+    client.service.state["action_generation"] = 7
+    state_hint = dict(client.service.state)
+    state_hint.pop("action_generation")
+    cache = ActionCache()
+    cache.put(
+        "fake-run",
+        state_hint,
+        {
+            "heating_setpoint_c": 20.0,
+            "cooling_setpoint_c": 25.0,
+            "hold_minutes": 60,
+        },
+    )
+    model = ScriptedModel([valid_tool_sequence()])
+    host = AgentHost(
+        mcp_client=client,
+        model=model,
+        config=AgentHostConfig(enable_action_cache=True),
+        action_cache=cache,
+    )
+
+    decision = await host.decide("fake-run", state_hint=state_hint)
+
+    assert decision.status == "applied"
+    assert decision.cache_hit is True
+    assert model.call_count == 0
+    assert client.service.applied[-1]["action_generation"] == 8
+    assert client.calls[-1][1]["action"]["action_generation"] == 8
 
 
 @pytest.mark.integration
