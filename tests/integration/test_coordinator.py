@@ -374,8 +374,10 @@ def test_real_run_prepares_selected_period_and_snapshots_inputs(
     request = captured_requests[0]
     assert request.model_path.parent.name == "inputs"
     assert request.model_path.read_text(encoding="utf-8") == "baseline-period-model"
+    assert request.process_timeout_seconds == settings.simulation_timeout_seconds
     assert (request.model_path.parent / "actuator_map.csv").is_file()
     run = SQLiteStore(settings.resolved_database_path()).get_run(request.run_id)
     assert run is not None
     assert len(str(run.metadata["preparation_fingerprint"])) == 64
     assert len(str(run.metadata["weather_sha256"])) == 64
+    assert run.metadata["simulation_timeout_seconds"] == settings.simulation_timeout_seconds

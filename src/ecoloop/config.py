@@ -132,6 +132,11 @@ class Settings(BaseSettings):
     ollama_model: str = Field(default="qwen3:8b", alias="OLLAMA_MODEL")
     ollama_keep_alive: str = Field(default="30m", alias="OLLAMA_KEEP_ALIVE")
     llm_timeout_seconds: float = Field(default=30.0, gt=0, alias="LLM_TIMEOUT_SECONDS")
+    simulation_timeout_seconds: float = Field(
+        default=7200.0,
+        gt=0,
+        alias="ECOLOOP_SIMULATION_TIMEOUT_SECONDS",
+    )
     max_tool_rounds: int = Field(default=8, gt=0, alias="ECOLOOP_MAX_TOOL_ROUNDS")
     max_consecutive_timeouts: int = Field(default=3, gt=0, alias="ECOLOOP_MAX_CONSECUTIVE_TIMEOUTS")
     state_token_budget: int = Field(default=1800, ge=256, alias="ECOLOOP_STATE_TOKEN_BUDGET")

@@ -351,6 +351,9 @@ def run_case(
             "weather_sha256": weather_sha256,
             "input_model_sha256": (_sha256_file(model_path) if model_path.is_file() else None),
             "display_delay_seconds": display_delay_seconds,
+            "decision_interval_minutes": runtime_settings.decision_interval_minutes,
+            "maximum_action_hold_minutes": runtime_settings.max_action_hold_minutes,
+            "simulation_timeout_seconds": runtime_settings.simulation_timeout_seconds,
         },
     )
     request = SimulationRequest(
@@ -365,6 +368,7 @@ def run_case(
             actuator_map if simulation_mode is not SimulationMode.BASELINE else None
         ),
         maximum_action_hold_minutes=runtime_settings.max_action_hold_minutes,
+        process_timeout_seconds=runtime_settings.simulation_timeout_seconds,
         decision_interval_minutes=runtime_settings.decision_interval_minutes,
         demand_event_threshold_kw=runtime_settings.demand_threshold_kw,
         display_delay_seconds=display_delay_seconds,
@@ -491,6 +495,7 @@ def replay_run(
             actuator_map_path=actuator_map,
             replay_schedule_path=replay_schedule,
             maximum_action_hold_minutes=runtime_settings.max_action_hold_minutes,
+            process_timeout_seconds=runtime_settings.simulation_timeout_seconds,
             decision_interval_minutes=runtime_settings.decision_interval_minutes,
             demand_event_threshold_kw=runtime_settings.demand_threshold_kw,
         )
