@@ -68,6 +68,12 @@ def test_dashboard_renders_all_production_tabs_without_exceptions(
         "Methodology",
     ]
     assert len(rendered.metric) >= 9
+    rendered_html = "\n".join(str(item.value) for item in rendered.markdown)
+    assert "EcoLoop Control Room" in rendered_html
+    assert "LIVE SIMULATION" in rendered_html
+    assert "REAL DATABASE RECORD" in rendered_html
+    assert "PHYSICAL STATE" in rendered_html
+    assert "HOW TO READ THE EVIDENCE" in rendered_html
 
 
 def test_dashboard_prefers_agent_evidence_and_formats_long_latency() -> None:

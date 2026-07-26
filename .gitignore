@@ -37,6 +37,8 @@ models/generated/*
 !models/generated/preparation-manifest.json
 submission/*
 !submission/.gitkeep
+Honeywell_Hackathon_Submission/
+Honeywell_Hackathon_Submission.zip
 tmp/
 presentation/build/
 

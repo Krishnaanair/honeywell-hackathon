@@ -17,13 +17,14 @@ import streamlit as st
 from ecoloop.config import get_settings, repository_root
 from ecoloop.dashboard import queries
 from ecoloop.dashboard.queries import DashboardDataError
+from ecoloop.dashboard.styles import DASHBOARD_CSS
 
 
 def main() -> None:
     """Render the six-tab EcoLoop operational dashboard."""
 
     st.set_page_config(
-        page_title="EcoLoop Building Agents",
+        page_title="EcoLoop Control Room",
         page_icon="🌿",
         layout="wide",
         initial_sidebar_state="auto",
@@ -37,13 +38,6 @@ def main() -> None:
         "true",
         "yes",
     }
-
-    _brand_header()
-    if replay_enabled:
-        st.warning(
-            f"REAL RUN REPLAY - source run `{replay_run_id or 'not selected'}`. "
-            "Display speed changes wall-clock playback only."
-        )
 
     try:
         runs = queries.list_runs(database_path, include_fake=False)
@@ -65,7 +59,8 @@ def main() -> None:
         st.error(f"Run disappeared: {run_id}")
         return
 
-    _run_context(run)
+    _brand_header(run, replay_enabled=replay_enabled)
+    _run_context(run, replay_enabled=replay_enabled)
     frame_limit = _replay_controls(database_path, run_id) if replay_enabled else None
 
     tabs = st.tabs(
@@ -93,8 +88,9 @@ def main() -> None:
 
     st.markdown(
         "<div class='ecoloop-footer'>"
-        "EnergyPlus 26.1.0 &nbsp;•&nbsp; Local inference &nbsp;•&nbsp; "
-        "Audited MCP control &nbsp;•&nbsp; SQLite evidence bus"
+        "<strong>EcoLoop evidence console</strong><br>"
+        "EnergyPlus 26.1.0 &nbsp;·&nbsp; Local inference &nbsp;·&nbsp; "
+        "Audited MCP control &nbsp;·&nbsp; SQLite evidence bus"
         "</div>",
         unsafe_allow_html=True,
     )
@@ -108,21 +104,41 @@ def main() -> None:
         st.rerun()
 
 
-def _brand_header() -> None:
+def _brand_header(run: dict[str, Any], *, replay_enabled: bool) -> None:
+    status = str(run.get("status") or "unknown").casefold()
+    if replay_enabled:
+        mode_label = "REAL RUN REPLAY"
+        mode_detail = "Recorded physical telemetry · visual playback only"
+        mode_class = "mode-replay"
+    elif status == "running":
+        mode_label = "LIVE SIMULATION"
+        mode_detail = "EnergyPlus telemetry · control loop active"
+        mode_class = "mode-live"
+    elif status == "completed":
+        mode_label = "COMPLETED EVIDENCE"
+        mode_detail = "Immutable run record · verified outputs"
+        mode_class = "mode-complete"
+    else:
+        mode_label = status.upper()
+        mode_detail = "Run record · inspect status below"
+        mode_class = "mode-neutral"
     st.markdown(
-        """
+        f"""
         <section class="ecoloop-hero">
-          <div class="ecoloop-eyebrow">GUARDRAILED BUILDING INTELLIGENCE</div>
-          <h1>EcoLoop Building Agents</h1>
-          <p>
-            A live EnergyPlus supervisory controller with local inference,
-            deterministic safety and audit-ready evidence.
-          </p>
-          <div class="ecoloop-hero-tags">
-            <span>ENERGYPLUS 26.1</span>
-            <span>LOCAL MODEL</span>
-            <span>MCP TOOL LOOP</span>
-            <span>REAL TELEMETRY</span>
+          <div class="hero-copy">
+            <div class="ecoloop-eyebrow">BUILDING SUPERVISORY CONTROL</div>
+            <h1>EcoLoop Control Room</h1>
+            <p>
+              Physical simulation, local decision-making and deterministic
+              guardrails in one audit-ready operations view.
+            </p>
+          </div>
+          <div class="hero-mode {mode_class}">
+            <span class="mode-signal"></span>
+            <div>
+              <strong>{escape(mode_label)}</strong>
+              <small>{escape(mode_detail)}</small>
+            </div>
           </div>
         </section>
         """,
@@ -130,11 +146,12 @@ def _brand_header() -> None:
     )
 
 
-def _run_context(run: dict[str, Any]) -> None:
+def _run_context(run: dict[str, Any], *, replay_enabled: bool) -> None:
     run_id = escape(str(run["run_id"]))
     status = escape(str(run.get("status") or "unknown"))
     run_type = escape(str(run.get("run_type") or "unknown"))
     period = escape(str(run.get("period_name") or "unspecified"))
+    evidence_label = "Replay source" if replay_enabled else "Evidence source"
     status_class = {
         "completed": "status-completed",
         "running": "status-running",
@@ -143,12 +160,17 @@ def _run_context(run: dict[str, Any]) -> None:
     st.markdown(
         f"""
         <div class="ecoloop-run-strip">
-          <div>
-            <span class="run-label">SELECTED EVIDENCE RUN</span>
-            <strong>{run_type.upper()} · {period.upper()}</strong>
-            <code>{run_id}</code>
+          <div class="run-primary">
+            <span class="run-label">{escape(evidence_label.upper())}</span>
+            <div class="run-title">
+              <strong>{run_type.upper()} · {period.upper()}</strong>
+              <code>{run_id}</code>
+            </div>
           </div>
-          <span class="run-status {status_class}">{status.upper()}</span>
+          <div class="run-secondary">
+            <span class="data-origin">REAL DATABASE RECORD</span>
+            <span class="run-status {status_class}">{status.upper()}</span>
+          </div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -158,7 +180,7 @@ def _run_context(run: dict[str, Any]) -> None:
         progress = 100.0
     st.progress(
         min(max(progress, 0.0), 100.0) / 100.0,
-        text=f"Simulation progress · {progress:.0f}%",
+        text=f"Simulation lifecycle · {progress:.0f}%",
     )
     st.sidebar.markdown(
         f"""
@@ -170,13 +192,21 @@ def _run_context(run: dict[str, Any]) -> None:
         """,
         unsafe_allow_html=True,
     )
-    st.sidebar.button("Refresh live data", width="stretch", type="primary")
+    st.sidebar.button("Refresh evidence", width="stretch", type="primary")
     st.sidebar.caption(f"EnergyPlus {escape(str(run.get('energyplus_version') or 'unknown'))}")
 
 
 def _select_run(runs: pd.DataFrame, forced: str | None) -> str:
-    st.sidebar.markdown("### Operations console")
-    st.sidebar.caption("Production view · fake test runs hidden")
+    st.sidebar.markdown(
+        """
+        <div class="sidebar-brand">
+          <span>ECOLOOP</span>
+          <strong>Evidence console</strong>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.caption("Real runs only · test fixtures hidden")
     choices = [str(item) for item in runs["run_id"].tolist()]
     if forced:
         if forced not in choices:
@@ -185,11 +215,12 @@ def _select_run(runs: pd.DataFrame, forced: str | None) -> str:
         return forced
     labels = {
         str(row.run_id): (
-            f"{row.run_type} | {row.status} | {row.period_name or 'period?'} | {row.run_id}"
+            f"{str(row.run_type).upper()} · {str(row.status).upper()} · "
+            f"{str(row.period_name or 'period').title()} · {str(row.run_id)[-8:]}"
         )
         for row in runs.itertuples()
     }
-    st.sidebar.markdown("#### Evidence source")
+    st.sidebar.markdown("#### Select evidence run")
     return st.sidebar.selectbox(
         "Current real run",
         choices,
@@ -217,8 +248,15 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     refreshed_run = queries.get_run(database_path, str(run["run_id"]))
     if refreshed_run is not None:
         run = refreshed_run
-    st.markdown("### Live Operations")
-    st.caption("The latest physical state, active setpoints and control-path evidence.")
+    run_stats = queries.run_statistics(database_path, str(run["run_id"]))
+    _section_header(
+        "Live Operations",
+        eyebrow="PHYSICAL STATE",
+        description=(
+            "Latest persisted EnergyPlus telemetry, active setpoints and the "
+            "control path that produced them."
+        ),
+    )
     telemetry = queries.telemetry(database_path, str(run["run_id"]), limit=limit)
     zones = queries.zone_telemetry(database_path, str(run["run_id"]), limit=None)
     if limit is not None and not telemetry.empty:
@@ -240,6 +278,8 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     cool_sp = None
     cumulative_energy = None
     outdoor = None
+    timestep_energy = None
+    recorded_at = None
     if not latest.empty:
         row = latest.iloc[0]
         simulation_clock = _simulation_clock(row["simulation_timestamp"])
@@ -248,8 +288,13 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
         cool_sp = row.get("cooling_setpoint_c")
         cumulative_energy = row.get("cumulative_electricity_kwh")
         outdoor = row.get("outdoor_temperature_c")
+        timestep_energy = row.get("timestep_electricity_kwh")
+        recorded_at = row.get("timestamp")
     occupancy = latest_zones["occupant_count"].sum() if not latest_zones.empty else None
     temp = latest_zones["operative_temperature_c"].mean() if not latest_zones.empty else None
+    temp_min = latest_zones["operative_temperature_c"].min() if not latest_zones.empty else None
+    temp_max = latest_zones["operative_temperature_c"].max() if not latest_zones.empty else None
+    pmv_abs = latest_zones["pmv"].abs().max() if not latest_zones.empty else None
     latency = decisions.iloc[0].get("latency_ms") if not decisions.empty else None
     applied_actions = (
         actions[actions["applied"] == 1] if not actions.empty and "applied" in actions else actions
@@ -261,24 +306,36 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     )
     fallback_active = fallback.casefold() not in {"", "none", "inactive", "no action"}
 
+    _telemetry_banner(
+        run_status=str(run.get("status") or "unknown"),
+        simulation_clock=simulation_clock,
+        recorded_at=recorded_at,
+        row_count=len(telemetry) if limit is not None else run_stats["telemetry_steps"],
+        replay=limit is not None,
+    )
+
     columns = st.columns(4)
     columns[0].metric("Simulation clock", simulation_clock)
     columns[1].metric("Progress", _format_value(run.get("progress_percent"), "%"))
-    columns[2].metric("Operative temperature", _format_value(temp, " °C"))
-    columns[3].metric("Facility demand", _format_value(demand, " kW"))
+    columns[2].metric("Facility demand", _format_value(demand, " kW"))
+    columns[3].metric("Cumulative electricity", _format_value(cumulative_energy, " kWh"))
 
     status_cols = st.columns(4)
-    status_cols[0].metric("Occupancy", _format_value(occupancy, " people"))
-    status_cols[1].metric("Heating setpoint", _format_value(heat_sp, " °C"))
-    status_cols[2].metric("Cooling setpoint", _format_value(cool_sp, " °C"))
-    status_cols[3].metric("Outdoor air", _format_value(outdoor, " °C"))
-
-    audit_cols = st.columns(2)
-    audit_cols[0].metric(
-        "Cumulative electricity",
-        _format_value(cumulative_energy, " kWh"),
+    status_cols[0].metric(
+        "Mean operative temperature",
+        _format_value(temp, " °C"),
+        delta=_range_text(temp_min, temp_max, " °C"),
+        delta_color="off",
     )
-    audit_cols[1].metric("Decision latency", _format_duration_ms(latency))
+    status_cols[1].metric("Outdoor air", _format_value(outdoor, " °C"))
+    status_cols[2].metric("Occupancy", _format_value(occupancy, " people"))
+    status_cols[3].metric("Latest timestep energy", _format_value(timestep_energy, " kWh"))
+
+    control_cols = st.columns(4)
+    control_cols[0].metric("Heating setpoint", _format_value(heat_sp, " °C"))
+    control_cols[1].metric("Cooling setpoint", _format_value(cool_sp, " °C"))
+    control_cols[2].metric("Maximum |PMV|", _format_value(pmv_abs))
+    control_cols[3].metric("Latest decision latency", _format_duration_ms(latency))
 
     if fallback_active and str(run.get("status")).casefold() == "running":
         st.warning(f"Deterministic fallback active · {fallback.replace('_', ' ').title()}")
@@ -295,10 +352,23 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     if telemetry.empty:
         st.info("The run exists but has not produced facility telemetry.")
     else:
+        chart_window = st.selectbox(
+            "Chart window",
+            ("Last 24 simulated hours", "Last 72 simulated hours", "Full run"),
+            index=0 if str(run.get("status")).casefold() == "running" else 2,
+            key=f"operations_window_{run['run_id']}",
+        )
+        chart_telemetry = _select_simulated_window(telemetry, chart_window)
+        chart_zones = zones[
+            zones["simulation_timestamp"].isin(chart_telemetry["simulation_timestamp"])
+        ]
         live_frame = telemetry.copy()
-        if not zones.empty:
+        live_frame = chart_telemetry.copy()
+        if not chart_zones.empty:
             mean_zone = (
-                zones.groupby("simulation_timestamp", as_index=False)["operative_temperature_c"]
+                chart_zones.groupby("simulation_timestamp", as_index=False)[
+                    "operative_temperature_c"
+                ]
                 .mean()
                 .rename(columns={"operative_temperature_c": "mean_operative_temperature_c"})
             )
@@ -331,8 +401,8 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
         )
         demand_figure = go.Figure()
         demand_figure.add_scatter(
-            x=telemetry["simulation_timestamp"],
-            y=telemetry["facility_demand_kw"],
+            x=chart_telemetry["simulation_timestamp"],
+            y=chart_telemetry["facility_demand_kw"],
             name="Demand",
             mode="lines",
             fill="tozeroy",
@@ -384,7 +454,11 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
             },
         )
 
-    left, right = st.columns(2)
+    _subsection_header(
+        "Control audit",
+        "The latest controller proposal, physically applied values and MCP calls.",
+    )
+    left, right = st.columns((0.9, 1.1), gap="large")
     with left:
         st.markdown("#### Latest control action")
         if actions.empty:
@@ -451,10 +525,13 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
 
 
 def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
-    st.markdown("### Baseline vs Agent")
-    st.caption(
-        "Official EnergyPlus totals from compatible completed real runs. "
-        "Incomplete and fake runs are excluded."
+    _section_header(
+        "Baseline vs Agent",
+        eyebrow="MEASURED OUTCOMES",
+        description=(
+            "Official EnergyPlus totals from compatible completed real runs. "
+            "Incomplete runs and test fixtures are excluded."
+        ),
     )
     baselines = runs[
         (runs["run_type"] == "baseline") & (runs["status"] == "completed") & (runs["is_fake"] == 0)
@@ -488,72 +565,84 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
         baseline_options,
         index=default_baseline,
     )
-    compatible, message = queries.compare_status(
+    comparison_stats = queries.comparison_statistics(
         database_path, str(baseline_id), str(controlled_id)
     )
-    if not compatible:
-        st.warning(message)
+    if not comparison_stats["compatible"]:
+        st.warning(comparison_stats["message"])
         return
-    st.success(message)
+    _comparison_provenance(
+        baseline_run=queries.get_run(database_path, str(baseline_id)),
+        controlled_run=queries.get_run(database_path, str(controlled_id)),
+    )
     baseline_metrics = queries.verified_metrics(database_path, str(baseline_id))
     controlled_metrics = queries.verified_metrics(database_path, str(controlled_id))
-    baseline_kwh = _metric_value(baseline_metrics, "facility_electricity_kwh")
-    controlled_kwh = _metric_value(controlled_metrics, "facility_electricity_kwh")
-    electricity_change = (
-        (controlled_kwh - baseline_kwh) / baseline_kwh * 100
-        if baseline_kwh is not None and baseline_kwh > 0 and controlled_kwh is not None
-        else None
-    )
+    electricity_stats = comparison_stats["metrics"]["facility_electricity_kwh"]
+    baseline_kwh = electricity_stats["baseline"]
+    controlled_kwh = electricity_stats["controlled"]
+    electricity_change = electricity_stats["percent_delta"]
     if electricity_change is not None and electricity_change <= 0:
-        st.success(
-            f"Measured facility electricity saving: {abs(electricity_change):.2f}% "
-            "for the selected period."
+        _outcome_banner(
+            tone="positive",
+            title=f"{abs(electricity_change):.2f}% lower facility electricity",
+            detail="Measured over the complete selected period; lower is better.",
         )
     elif electricity_change is not None:
-        st.warning(
-            f"Measured facility electricity increase: {electricity_change:.2f}% "
-            "for the selected period. This is reported without adjustment."
+        _outcome_banner(
+            tone="caution",
+            title=f"{electricity_change:.2f}% higher facility electricity",
+            detail=(
+                "The controlled case used more electricity. The dashboard reports "
+                "this measured result without adjustment."
+            ),
+        )
+    else:
+        _outcome_banner(
+            tone="neutral",
+            title="Electricity change unavailable",
+            detail="The selected pair does not contain both verified facility totals.",
         )
 
     peak_baseline = _metric_value(baseline_metrics, "peak_electrical_demand_kw")
     peak_controlled = _metric_value(controlled_metrics, "peak_electrical_demand_kw")
-    hvac_baseline = _metric_value(baseline_metrics, "hvac_electricity_kwh")
-    hvac_controlled = _metric_value(controlled_metrics, "hvac_electricity_kwh")
-    peak_change = _percent_change(peak_baseline, peak_controlled)
-    hvac_change = _percent_change(hvac_baseline, hvac_controlled)
-    cards = st.columns(3)
-    cards[0].metric("Baseline electricity", _format_value(baseline_kwh, " kWh"))
-    cards[1].metric("Controlled electricity", _format_value(controlled_kwh, " kWh"))
-    cards[2].metric(
-        "Electricity change",
-        _signed_percent(electricity_change),
-        delta="lower is better",
-        delta_color="off",
+    baseline_violation = _metric_value(baseline_metrics, "occupied_temperature_violation_percent")
+    controlled_violation = _metric_value(
+        controlled_metrics, "occupied_temperature_violation_percent"
     )
-    secondary_cards = st.columns(3)
-    secondary_cards[0].metric(
+    baseline_compliance = 100.0 - baseline_violation if baseline_violation is not None else None
+    controlled_compliance = (
+        100.0 - controlled_violation if controlled_violation is not None else None
+    )
+    cards = st.columns(4)
+    cards[0].metric(
+        "Facility electricity",
+        _format_value(controlled_kwh, " kWh"),
+        delta=_comparison_delta(baseline_kwh, controlled_kwh, " kWh"),
+        delta_color="inverse",
+    )
+    cards[1].metric(
         "Peak demand",
         _format_value(peak_controlled, " kW"),
-        delta=_signed_percent(peak_change),
+        delta=_comparison_delta(peak_baseline, peak_controlled, " kW"),
         delta_color="inverse",
     )
-    secondary_cards[1].metric(
-        "HVAC electricity",
-        _format_value(hvac_controlled, " kWh"),
-        delta=_signed_percent(hvac_change),
-        delta_color="inverse",
+    cards[2].metric(
+        "Occupied comfort",
+        _format_value(controlled_compliance, "%"),
+        delta=_points_delta(baseline_compliance, controlled_compliance),
+        delta_color="normal",
     )
-    secondary_cards[2].metric(
-        "Temp. violation",
+    cards[3].metric(
+        "PMV compliance",
         _format_value(
-            _metric_value(controlled_metrics, "occupied_temperature_violation_percent"),
+            _metric_value(controlled_metrics, "pmv_compliance_percent"),
             "%",
         ),
-        delta=_delta_text(
-            _metric_value(baseline_metrics, "occupied_temperature_violation_percent"),
-            _metric_value(controlled_metrics, "occupied_temperature_violation_percent"),
+        delta=_points_delta(
+            _metric_value(baseline_metrics, "pmv_compliance_percent"),
+            _metric_value(controlled_metrics, "pmv_compliance_percent"),
         ),
-        delta_color="inverse",
+        delta_color="normal",
     )
 
     impact_cards = st.columns(4)
@@ -573,10 +662,14 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
         card.metric(
             label,
             _format_value(controlled_value, suffix),
-            delta=_delta_text(base, controlled_value),
+            delta=_comparison_delta(base, controlled_value, suffix),
             delta_color="inverse" if metric_name != "pmv_compliance_percent" else "normal",
         )
 
+    _subsection_header(
+        "Energy trajectory",
+        "Cumulative Runtime API telemetry aligned at identical simulated timestamps.",
+    )
     aligned = queries.aligned_cumulative_energy(database_path, str(baseline_id), str(controlled_id))
     if not aligned.empty:
         figure = go.Figure()
@@ -602,27 +695,33 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
         )
         st.plotly_chart(figure, width="stretch")
 
-    comfort_rows = []
-    for label, metrics in (("Baseline", baseline_metrics), ("Controlled", controlled_metrics)):
-        comfort_rows.append(
-            {
-                "case": label,
-                "occupied temperature violation %": _metric_value(
-                    metrics, "occupied_temperature_violation_percent"
-                ),
-                "violation degree-hours": _metric_value(
-                    metrics, "occupied_temperature_violation_degree_hours"
-                ),
-                "PMV compliance %": _metric_value(metrics, "pmv_compliance_percent"),
-                "mean PPD %": _metric_value(metrics, "mean_ppd_percent"),
-            }
-        )
-    st.dataframe(pd.DataFrame(comfort_rows), hide_index=True, width="stretch")
+    _subsection_header(
+        "Verified outcome scorecard",
+        "Every row comes from metrics explicitly marked verified in the run database.",
+    )
+    scorecard = _comparison_scorecard(baseline_metrics, controlled_metrics)
+    st.dataframe(
+        scorecard,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Baseline": st.column_config.NumberColumn(format="%.2f"),
+            "Controlled": st.column_config.NumberColumn(format="%.2f"),
+            "Absolute change": st.column_config.NumberColumn(format="%+.2f"),
+            "Relative change": st.column_config.NumberColumn(format="%+.2f%%"),
+        },
+    )
 
 
 def _comfort(database_path: Path, run_id: str, limit: int | None) -> None:
-    st.markdown("### Comfort and IAQ")
-    st.caption("Zone-level thermal comfort evidence from the EnergyPlus physical model.")
+    _section_header(
+        "Comfort and IAQ",
+        eyebrow="ZONE EVIDENCE",
+        description=(
+            "Thermal comfort and air-quality points reported by the EnergyPlus "
+            "physical model, without imputation."
+        ),
+    )
     zones = queries.zone_telemetry(database_path, run_id)
     if zones.empty:
         st.info("No zone telemetry is available.")
@@ -640,6 +739,115 @@ def _comfort(database_path: Path, run_id: str, limit: int | None) -> None:
     if zones.empty:
         st.info("Select at least one zone to display comfort evidence.")
         return
+    occupied = zones[zones["occupant_count"].fillna(0) > 0]
+    comfort_basis = occupied if not occupied.empty else zones.iloc[0:0]
+    occupied_operative = comfort_basis["operative_temperature_c"].dropna()
+    occupied_pmv = comfort_basis["pmv"].dropna()
+    occupied_compliance = (
+        float(occupied_operative.between(22.0, 26.0, inclusive="both").mean() * 100.0)
+        if not occupied_operative.empty
+        else None
+    )
+    pmv_compliance = (
+        float((occupied_pmv.abs() <= 0.7).mean() * 100.0) if not occupied_pmv.empty else None
+    )
+    comfort_cols = st.columns(4)
+    comfort_cols[0].metric("Selected zones", len(selected))
+    comfort_cols[1].metric(
+        "Occupied temperature compliance",
+        _format_value(occupied_compliance, "%"),
+    )
+    comfort_cols[2].metric("Occupied PMV compliance", _format_value(pmv_compliance, "%"))
+    comfort_cols[3].metric(
+        "Mean occupied PPD",
+        _format_value(
+            comfort_basis["ppd_percent"].mean() if not comfort_basis.empty else None,
+            "%",
+        ),
+    )
+
+    replay_end = (
+        zones["simulation_timestamp"].max() if limit is not None and not zones.empty else None
+    )
+    zone_summary = queries.comfort_distribution(
+        database_path,
+        run_id,
+        simulation_end=replay_end,
+    )
+    zone_summary = zone_summary[zone_summary["zone_name"].isin(selected)].rename(
+        columns={
+            "zone_name": "Zone",
+            "samples": "Samples",
+            "occupied_samples": "Occupied samples",
+            "operative_temperature_mean_c": "Mean operative °C",
+            "operative_temperature_p05_c": "P05 operative °C",
+            "operative_temperature_p95_c": "P95 operative °C",
+            "occupied_mean_ppd_percent": "Mean PPD %",
+            "occupied_pmv_max_abs": "Max |PMV|",
+            "relative_humidity_mean_percent": "Mean RH %",
+            "co2_max_ppm": "Max CO₂ ppm",
+        }
+    )
+    zone_summary = zone_summary[
+        [
+            "Zone",
+            "Samples",
+            "Occupied samples",
+            "Mean operative °C",
+            "P05 operative °C",
+            "P95 operative °C",
+            "Mean PPD %",
+            "Max |PMV|",
+            "Mean RH %",
+            "Max CO₂ ppm",
+        ]
+    ]
+    st.dataframe(
+        zone_summary,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            "Mean operative °C": st.column_config.NumberColumn(format="%.2f"),
+            "P05 operative °C": st.column_config.NumberColumn(format="%.2f"),
+            "P95 operative °C": st.column_config.NumberColumn(format="%.2f"),
+            "Mean PPD %": st.column_config.NumberColumn(format="%.2f"),
+            "Max |PMV|": st.column_config.NumberColumn(format="%.2f"),
+            "Mean RH %": st.column_config.NumberColumn(format="%.1f"),
+            "Max CO₂ ppm": st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
+
+    _subsection_header(
+        "Temperature distribution",
+        "The shaded band is the configured occupied operative-temperature target.",
+    )
+    distribution_figure = px.box(
+        zones,
+        x="zone_name",
+        y="operative_temperature_c",
+        color="zone_name",
+        points=False,
+        color_discrete_sequence=px.colors.qualitative.Safe,
+    )
+    distribution_figure.add_hrect(
+        y0=22,
+        y1=26,
+        fillcolor="rgba(17,167,125,0.10)",
+        line_width=0,
+    )
+    _style_chart(
+        distribution_figure,
+        title="Operative temperature distribution by zone",
+        yaxis_title="Temperature (°C)",
+        height=390,
+    )
+    distribution_figure.update_layout(showlegend=False)
+    st.plotly_chart(distribution_figure, width="stretch")
+
+    _subsection_header(
+        "Thermal trajectory",
+        "Zone traces remain aligned to their original simulated timestamps.",
+    )
     temperature_figure = px.line(
         zones,
         x="simulation_timestamp",
@@ -661,14 +869,6 @@ def _comfort(database_path: Path, run_id: str, limit: int | None) -> None:
         yaxis_title="Temperature (°C)",
     )
     st.plotly_chart(temperature_figure, width="stretch")
-    comfort_cols = st.columns(4)
-    comfort_cols[0].metric("Mean PPD", _format_value(zones["ppd_percent"].mean(), "%"))
-    comfort_cols[1].metric("Max |PMV|", _format_value(zones["pmv"].abs().max()))
-    comfort_cols[2].metric(
-        "Mean relative humidity",
-        _format_value(zones["relative_humidity_percent"].mean(), "%"),
-    )
-    comfort_cols[3].metric("Max CO₂", _format_value(zones["co2_ppm"].max(), " ppm"))
     if zones["pmv"].notna().any():
         pmv_figure = px.line(
             zones.dropna(subset=["pmv"]),
@@ -713,24 +913,33 @@ def _comfort(database_path: Path, run_id: str, limit: int | None) -> None:
         st.plotly_chart(co2_figure, width="stretch")
     else:
         st.info(
-            "CO₂ is unavailable because this source model does not expose a verified "
-            "contaminant-simulation point. No value is fabricated."
+            "CO₂ is not available for this run because the source model does not expose "
+            "a verified contaminant-simulation point. The dashboard leaves it blank."
         )
 
 
 def _decisions(database_path: Path, run_id: str) -> None:
-    st.markdown("### Agent Decisions")
-    st.caption(
-        "Operational explanations, evaluated candidates and proposed-versus-applied actions. "
-        "Private reasoning is never requested or stored."
+    _section_header(
+        "Agent Decisions",
+        eyebrow="CONTROL TRACE",
+        description=(
+            "Operational explanations, candidate evaluations and deterministic "
+            "validation from the audited tool loop."
+        ),
     )
-    decisions = queries.recent_decisions(database_path, run_id, limit=200)
-    actions = queries.recent_actions(database_path, run_id, limit=200)
-    tools = queries.recent_tool_calls(database_path, run_id, limit=500)
+    decisions = queries.recent_decisions(database_path, run_id, limit=10_000)
+    actions = queries.recent_actions(database_path, run_id, limit=10_000)
+    tools = queries.recent_tool_calls(database_path, run_id, limit=10_000)
     if decisions.empty:
         st.info("No decision records exist for this run.")
     else:
-        decision_cards = st.columns(5)
+        applied_count = (
+            int(actions["applied"].fillna(0).sum())
+            if not actions.empty and "applied" in actions
+            else 0
+        )
+        tool_success = float(tools["success"].fillna(0).mean() * 100.0) if not tools.empty else None
+        decision_cards = st.columns(4)
         decision_cards[0].metric("Decisions", len(decisions))
         decision_cards[1].metric(
             "Average latency",
@@ -741,12 +950,29 @@ def _decisions(database_path: Path, run_id: str) -> None:
             _format_duration_ms(decisions["latency_ms"].quantile(0.95)),
         )
         decision_cards[3].metric(
-            "Fallbacks",
+            "Tool success",
+            _format_value(tool_success, "%"),
+        )
+        pathway_cards = st.columns(4)
+        pathway_cards[0].metric(
+            "Physically applied",
+            applied_count,
+            delta=_rate_text(applied_count, len(actions)),
+            delta_color="off",
+        )
+        pathway_cards[1].metric(
+            "Fallback decisions",
             int(decisions["fallback_status"].map(_is_active_fallback).sum()),
         )
-        decision_cards[4].metric(
-            "Incomplete",
-            int((decisions["completed"] == 0).sum()),
+        pathway_cards[2].metric(
+            "Safety-modified actions",
+            int(actions["clamp_details"].map(_has_clamp).sum()) if not actions.empty else 0,
+        )
+        pathway_cards[3].metric(
+            "Cached actions",
+            int(actions["cache_hit"].fillna(0).sum())
+            if not actions.empty and "cache_hit" in actions
+            else 0,
         )
         latest = decisions.iloc[0]
         outcome = (
@@ -773,9 +999,27 @@ def _decisions(database_path: Path, run_id: str) -> None:
             """,
             unsafe_allow_html=True,
         )
-        with st.expander("Decision history and candidate score components", expanded=True):
+
+        latency_figure = go.Figure()
+        ordered_decisions = decisions.sort_values("timestamp")
+        latency_figure.add_scatter(
+            x=ordered_decisions["timestamp"],
+            y=ordered_decisions["latency_ms"] / 1_000.0,
+            mode="lines+markers",
+            name="Decision latency",
+            line={"color": "#167d91", "width": 2.2},
+            marker={"size": 5},
+        )
+        _style_chart(
+            latency_figure,
+            title="Decision latency over the run",
+            yaxis_title="Latency (seconds)",
+        )
+        st.plotly_chart(latency_figure, width="stretch")
+
+        with st.expander("Decision history and candidate score components", expanded=False):
             st.dataframe(
-                decisions[
+                decisions.head(250)[
                     [
                         "timestamp",
                         "observation_id",
@@ -796,7 +1040,7 @@ def _decisions(database_path: Path, run_id: str) -> None:
         st.caption("No actions exist for this run.")
     else:
         st.dataframe(
-            actions[
+            actions.head(250)[
                 [
                     "timestamp",
                     "observation_id",
@@ -816,35 +1060,70 @@ def _decisions(database_path: Path, run_id: str) -> None:
     if tools.empty:
         st.caption("No tool-call trace exists for this run.")
     else:
-        st.dataframe(
-            tools[
-                [
-                    "timestamp",
-                    "sequence",
-                    "tool_name",
-                    "success",
-                    "duration_ms",
-                    "control_affecting",
-                    "error",
-                ]
-            ],
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "success": st.column_config.CheckboxColumn(),
-                "control_affecting": st.column_config.CheckboxColumn(),
-                "duration_ms": st.column_config.NumberColumn(format="%.1f"),
-            },
+        tool_counts = (
+            tools.groupby("tool_name", as_index=False)
+            .agg(
+                calls=("tool_name", "size"),
+                success_rate=("success", "mean"),
+                mean_latency_ms=("duration_ms", "mean"),
+            )
+            .sort_values("calls", ascending=True)
         )
+        tool_counts["success_rate"] = tool_counts["success_rate"] * 100.0
+        tool_figure = px.bar(
+            tool_counts,
+            x="calls",
+            y="tool_name",
+            orientation="h",
+            color="mean_latency_ms",
+            color_continuous_scale=["#dff3ed", "#0d766e"],
+            hover_data={"success_rate": ":.1f", "mean_latency_ms": ":.1f"},
+        )
+        _style_chart(
+            tool_figure,
+            title="MCP tool usage",
+            yaxis_title="Tool",
+            height=max(340, min(560, 120 + 38 * len(tool_counts))),
+        )
+        tool_figure.update_layout(coloraxis_colorbar_title="Mean ms")
+        st.plotly_chart(tool_figure, width="stretch")
+        with st.expander("Complete recent MCP trace", expanded=False):
+            st.dataframe(
+                tools.head(500)[
+                    [
+                        "timestamp",
+                        "sequence",
+                        "tool_name",
+                        "success",
+                        "duration_ms",
+                        "control_affecting",
+                        "error",
+                    ]
+                ],
+                hide_index=True,
+                width="stretch",
+                column_config={
+                    "success": st.column_config.CheckboxColumn(),
+                    "control_affecting": st.column_config.CheckboxColumn(),
+                    "duration_ms": st.column_config.NumberColumn(format="%.1f"),
+                },
+            )
 
 
 def _reliability(database_path: Path, run_id: str) -> None:
-    st.markdown("### Reliability and Errors")
-    st.caption("Timeouts, fallbacks, safety intervention and EnergyPlus diagnostics.")
+    _section_header(
+        "Reliability and Errors",
+        eyebrow="EVIDENCE HEALTH",
+        description=(
+            "Timeout recovery, safety intervention, protocol health and EnergyPlus "
+            "diagnostics kept in separate audit channels."
+        ),
+    )
     tools = queries.recent_tool_calls(database_path, run_id, limit=10_000)
     decisions = queries.recent_decisions(database_path, run_id, limit=10_000)
     actions = queries.recent_actions(database_path, run_id, limit=10_000)
     errors = queries.errors_and_messages(database_path, run_id, limit=500)
+    run_stats = queries.run_statistics(database_path, run_id)
     applied_actions = (
         actions[actions["applied"] == 1] if not actions.empty and "applied" in actions else actions
     )
@@ -870,18 +1149,28 @@ def _reliability(database_path: Path, run_id: str) -> None:
     )
     invalid_count = _verified_count(verified, "invalid_action_count", 0)
     energyplus_diagnostics, controller_diagnostics = _diagnostic_groups(errors)
+    cross_check = _structured_metric(verified, "energy_cross_check")
+    finalization = _structured_metric(verified, "finalization_verification")
+    tool_success_rate = (
+        run_stats["successful_tool_call_count"] / run_stats["tool_call_count"] * 100.0
+        if run_stats["tool_call_count"]
+        else None
+    )
+    _integrity_banner(
+        run_verified=bool(finalization.get("verified_for_comparison")),
+        cross_check_passed=bool(cross_check.get("passed")),
+        run_id=run_id,
+    )
     cards = st.columns(4)
-    cards[0].metric("Decisions", len(decisions))
-    cards[1].metric("Tool calls", len(tools))
+    cards[0].metric("Decisions", run_stats["decision_count"])
+    cards[1].metric("Tool calls", run_stats["tool_call_count"])
     cards[2].metric(
-        "Mean tool latency",
-        _format_value(tools["duration_ms"].mean() if not tools.empty else None, " ms"),
+        "Tool success",
+        _format_value(tool_success_rate, "%"),
     )
     cards[3].metric(
         "P95 decision latency",
-        _format_duration_ms(
-            decisions["latency_ms"].quantile(0.95) if not decisions.empty else None
-        ),
+        _format_duration_ms(run_stats["p95_decision_latency_ms"]),
     )
     recovery_cards = st.columns(5)
     recovery_cards[0].metric("Timeouts", timeout_count)
@@ -891,6 +1180,35 @@ def _reliability(database_path: Path, run_id: str) -> None:
     recovery_cards[4].metric(
         "Failed tools",
         int((tools["success"] == 0).sum()) if not tools.empty else 0,
+    )
+
+    evidence_cards = st.columns(4)
+    evidence_cards[0].metric(
+        "Physical application rate",
+        _format_value(run_stats["action_application_percent"], "%"),
+    )
+    evidence_cards[1].metric(
+        "Energy cross-check",
+        (
+            "PASS"
+            if cross_check.get("passed") is True
+            else "FAIL"
+            if cross_check.get("passed") is False
+            else "Unavailable"
+        ),
+    )
+    evidence_cards[2].metric(
+        "Cross-check difference",
+        _format_value(cross_check.get("difference_percent"), "%"),
+    )
+    evidence_cards[3].metric(
+        "Verified final metrics",
+        "YES" if finalization.get("verified_for_comparison") else "NO",
+    )
+
+    _subsection_header(
+        "Diagnostics",
+        "EnergyPlus engine messages and controller diagnostics are counted independently.",
     )
     if energyplus_diagnostics.empty:
         st.success("No EnergyPlus warning, severe or fatal diagnostics are recorded.")
@@ -951,23 +1269,288 @@ def _reliability(database_path: Path, run_id: str) -> None:
 
 
 def _methodology() -> None:
-    st.markdown("### Methodology")
-    st.caption("How the comparison stays reproducible, conservative and auditable.")
+    _section_header(
+        "Methodology",
+        eyebrow="HOW TO READ THE EVIDENCE",
+        description=(
+            "The controls, compatibility gates and result sources behind every "
+            "number shown in this dashboard."
+        ),
+    )
     cards = st.columns(4)
     cards[0].metric("Zone timestep", "15 min")
     cards[1].metric("Normal decision cadence", "60 min")
     cards[2].metric("Maximum action hold", "120 min")
     cards[3].metric("Inference", "Local only")
-    st.info(
-        "Energy totals come from final EnergyPlus outputs and are independently "
-        "cross-checked against Runtime API telemetry. Failed or incomplete runs never "
-        "produce savings claims."
+    st.markdown(
+        """
+        <div class="method-grid">
+          <article>
+            <span>01</span>
+            <strong>Observe</strong>
+            <p>EnergyPlus callbacks persist facility and zone telemetry once per zone timestep.</p>
+          </article>
+          <article>
+            <span>02</span>
+            <strong>Decide</strong>
+            <p>The local model uses narrowly scoped MCP tools and bounded candidate actions.</p>
+          </article>
+          <article>
+            <span>03</span>
+            <strong>Validate</strong>
+            <p>A deterministic layer checks freshness, capability, deadband, rate and expiry.</p>
+          </article>
+          <article>
+            <span>04</span>
+            <strong>Verify</strong>
+            <p>
+              Official EnergyPlus totals are cross-checked against the persisted
+              telemetry trail.
+            </p>
+          </article>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    _outcome_banner(
+        tone="neutral",
+        title="Conservative publication gate",
+        detail=(
+            "Failed, incomplete, mismatched or test-fixture runs cannot produce a comparison claim."
+        ),
     )
     path = repository_root() / "docs" / "methodology.md"
     if path.is_file():
-        st.markdown(path.read_text(encoding="utf-8"))
+        with st.expander("Read the complete evaluation methodology", expanded=False):
+            st.markdown(path.read_text(encoding="utf-8"))
     else:
         st.info("Methodology document is unavailable.")
+
+
+def _section_header(title: str, *, eyebrow: str, description: str) -> None:
+    st.markdown(
+        f"""
+        <div class="section-heading">
+          <span>{escape(eyebrow)}</span>
+          <h2>{escape(title)}</h2>
+          <p>{escape(description)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _subsection_header(title: str, description: str) -> None:
+    st.markdown(
+        f"""
+        <div class="subsection-heading">
+          <h3>{escape(title)}</h3>
+          <p>{escape(description)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _telemetry_banner(
+    *,
+    run_status: str,
+    simulation_clock: str,
+    recorded_at: Any,
+    row_count: int,
+    replay: bool,
+) -> None:
+    if replay:
+        tone = "replay"
+        label = "REAL-RUN REPLAY"
+        detail = f"Showing persisted frame {row_count:,} · simulated {simulation_clock}"
+    elif run_status.casefold() == "running":
+        tone = "live"
+        label = "LIVE DATA INGEST"
+        detail = (
+            f"Latest persisted sample · simulated {simulation_clock} · "
+            f"recorded {_timestamp_text(recorded_at)}"
+        )
+    elif run_status.casefold() == "completed":
+        tone = "complete"
+        label = "COMPLETED RUN"
+        detail = f"{row_count:,} persisted facility samples · final frame {simulation_clock}"
+    else:
+        tone = "neutral"
+        label = run_status.upper()
+        detail = f"{row_count:,} persisted facility samples"
+    st.markdown(
+        f"""
+        <div class="telemetry-banner banner-{escape(tone)}">
+          <div><span class="mode-signal"></span><strong>{escape(label)}</strong></div>
+          <p>{escape(detail)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _timestamp_text(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "time unavailable"
+    timestamp = pd.Timestamp(value)
+    return str(timestamp.strftime("%H:%M:%S UTC"))
+
+
+def _comparison_provenance(
+    *,
+    baseline_run: dict[str, Any] | None,
+    controlled_run: dict[str, Any] | None,
+) -> None:
+    if baseline_run is None or controlled_run is None:
+        return
+    period = str(controlled_run.get("period_name") or "unspecified").title()
+    version = str(controlled_run.get("energyplus_version") or "unknown")
+    weather = Path(str(controlled_run.get("weather_path") or "weather unavailable")).name
+    st.markdown(
+        f"""
+        <div class="pair-strip">
+          <div>
+            <span>REFERENCE</span>
+            <strong>{escape(str(baseline_run["run_id"]))}</strong>
+          </div>
+          <div class="pair-arrow">→</div>
+          <div>
+            <span>CONTROLLED</span>
+            <strong>{escape(str(controlled_run["run_id"]))}</strong>
+          </div>
+          <div class="pair-meta">
+            <span>{escape(period)}</span>
+            <span>EnergyPlus {escape(version)}</span>
+            <span>{escape(weather)}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _outcome_banner(*, tone: str, title: str, detail: str) -> None:
+    st.markdown(
+        f"""
+        <div class="outcome-banner outcome-{escape(tone)}">
+          <span>{escape(title)}</span>
+          <p>{escape(detail)}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _integrity_banner(
+    *,
+    run_verified: bool,
+    cross_check_passed: bool,
+    run_id: str,
+) -> None:
+    passed = run_verified and cross_check_passed
+    tone = "positive" if passed else "caution"
+    title = "Publication checks passed" if passed else "Publication checks incomplete"
+    detail = (
+        "Final metrics are verified and official EnergyPlus electricity agrees with "
+        "the Runtime API telemetry cross-check."
+        if passed
+        else "One or more final verification gates are unavailable for this run."
+    )
+    _outcome_banner(
+        tone=tone,
+        title=title,
+        detail=f"{detail} Run {run_id}.",
+    )
+
+
+def _select_simulated_window(frame: pd.DataFrame, selection: str) -> pd.DataFrame:
+    if frame.empty or selection == "Full run":
+        return frame
+    hours = 24 if selection == "Last 24 simulated hours" else 72
+    latest = frame["simulation_timestamp"].max()
+    return frame[frame["simulation_timestamp"] >= latest - pd.Timedelta(hours=hours)]
+
+
+def _comparison_scorecard(
+    baseline: dict[str, dict[str, Any]],
+    controlled: dict[str, dict[str, Any]],
+) -> pd.DataFrame:
+    definitions = (
+        ("facility_electricity_kwh", "Facility electricity", "Lower"),
+        ("hvac_electricity_kwh", "HVAC electricity", "Lower"),
+        ("peak_electrical_demand_kw", "Peak electrical demand", "Lower"),
+        ("cost", "Operating cost", "Lower"),
+        ("operational_carbon_kg", "Operational carbon", "Lower"),
+        (
+            "occupied_temperature_violation_percent",
+            "Occupied temperature violation",
+            "Lower",
+        ),
+        (
+            "occupied_temperature_violation_degree_hours",
+            "Violation degree-hours",
+            "Lower",
+        ),
+        ("pmv_compliance_percent", "PMV compliance", "Higher"),
+        ("mean_ppd_percent", "Mean PPD", "Lower"),
+    )
+    rows: list[dict[str, Any]] = []
+    for metric_name, label, direction in definitions:
+        baseline_value = _metric_value(baseline, metric_name)
+        controlled_value = _metric_value(controlled, metric_name)
+        if baseline_value is None and controlled_value is None:
+            continue
+        units = str(
+            controlled.get(metric_name, {}).get("units")
+            or baseline.get(metric_name, {}).get("units")
+            or ""
+        )
+        rows.append(
+            {
+                "Metric": label,
+                "Unit": units,
+                "Baseline": baseline_value,
+                "Controlled": controlled_value,
+                "Absolute change": (
+                    controlled_value - baseline_value
+                    if baseline_value is not None and controlled_value is not None
+                    else None
+                ),
+                "Relative change": _percent_change(baseline_value, controlled_value),
+                "Preferred direction": direction,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _zone_summary(zones: pd.DataFrame) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for zone_name, frame in zones.groupby("zone_name", sort=True):
+        occupied = frame["occupant_count"].fillna(0) > 0
+        rows.append(
+            {
+                "Zone": zone_name,
+                "Samples": len(frame),
+                "Occupied samples": int(occupied.sum()),
+                "Mean operative °C": frame["operative_temperature_c"].mean(),
+                "P05 operative °C": frame["operative_temperature_c"].quantile(0.05),
+                "P95 operative °C": frame["operative_temperature_c"].quantile(0.95),
+                "Mean PPD %": frame["ppd_percent"].mean(),
+                "Max |PMV|": frame["pmv"].abs().max(),
+                "Mean RH %": frame["relative_humidity_percent"].mean(),
+                "Max CO₂ ppm": frame["co2_ppm"].max(),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _structured_metric(
+    metrics: dict[str, dict[str, Any]],
+    metric_name: str,
+) -> dict[str, Any]:
+    value = metrics.get(metric_name, {}).get("structured_value")
+    return value if isinstance(value, dict) else {}
 
 
 def _simulation_clock(value: Any) -> str:
@@ -982,13 +1565,14 @@ def _style_chart(
     *,
     title: str,
     yaxis_title: str,
+    height: int = 340,
 ) -> None:
     figure.update_layout(
         title={"text": title, "font": {"size": 18, "color": "#173b32"}},
         yaxis_title=yaxis_title,
         xaxis_title=None,
         template="plotly_white",
-        height=340,
+        height=height,
         margin={"l": 24, "r": 18, "t": 76, "b": 24},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#ffffff",
@@ -1044,6 +1628,35 @@ def _percent_change(baseline: float | None, controlled: float | None) -> float |
     return (controlled - baseline) / baseline * 100
 
 
+def _comparison_delta(
+    baseline: float | None,
+    controlled: float | None,
+    suffix: str,
+) -> str | None:
+    if baseline is None or controlled is None:
+        return None
+    difference = controlled - baseline
+    return f"{difference:+,.2f}{suffix} vs baseline"
+
+
+def _points_delta(baseline: float | None, controlled: float | None) -> str | None:
+    if baseline is None or controlled is None:
+        return None
+    return f"{controlled - baseline:+,.2f} points"
+
+
+def _range_text(low: float | None, high: float | None, suffix: str) -> str | None:
+    if low is None or high is None or pd.isna(low) or pd.isna(high):
+        return None
+    return f"{low:,.1f}-{high:,.1f}{suffix} zone range"
+
+
+def _rate_text(numerator: int, denominator: int) -> str:
+    if denominator <= 0:
+        return "No proposals"
+    return f"{numerator / denominator * 100.0:.1f}% of proposals"
+
+
 def _signed_percent(value: float | None) -> str:
     if value is None or pd.isna(value):
         return "Unavailable"
@@ -1095,13 +1708,20 @@ def _format_duration_ms(value: Any) -> str:
 
 
 def _preferred_controlled_index(controlled: pd.DataFrame) -> int:
-    priorities = ("agent", "rule", "replay", "fixed_override")
-    run_types = controlled["run_type"].astype(str).tolist()
-    for priority in priorities:
-        for index, run_type in enumerate(run_types):
-            if run_type == priority:
-                return index
-    return 0
+    type_rank = {"agent": 0, "rule": 1, "replay": 2, "fixed_override": 3}
+    period_rank = {"evaluation": 0, "demo": 1, "smoke": 2}
+    ranked: list[tuple[int, int, int]] = []
+    for index, row in controlled.reset_index(drop=True).iterrows():
+        run_type = str(row.get("run_type") or "")
+        period = str(row.get("period_name") or "")
+        ranked.append(
+            (
+                type_rank.get(run_type, len(type_rank)),
+                period_rank.get(period, 1),
+                int(index),
+            )
+        )
+    return min(ranked)[2] if ranked else 0
 
 
 def _diagnostic_groups(errors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -1412,6 +2032,7 @@ def _apply_style() -> None:
         """,
         unsafe_allow_html=True,
     )
+    st.markdown(f"<style>{DASHBOARD_CSS}</style>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

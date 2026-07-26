@@ -668,3 +668,57 @@ retain every safety, occupancy, comfort, baseline, model, weather, and
 evaluation constraint, and require both positive official-output savings and
 baseline-or-better comfort before publication. It has not been executed and is
 not represented in any result, dashboard metric, report, or slide.
+
+## 2026-07-26 - Control-room redesign and fresh real-run audit
+
+### Completed
+
+- Rebuilt the Streamlit interface as a responsive six-view building control
+  room with explicit live, completed, and replay states.
+- Added persisted run, comfort-distribution, comparison, control-reliability,
+  latency, action, tool-use, setpoint, provenance, and completeness statistics.
+- Kept production selectors real-only and made comparison publication fail
+  closed unless both runs are completed, non-test records with matching model
+  preparation, matching weather-content checksums, passed official-output
+  cross-checks, and verified finalization.
+- Corrected replay summaries so comfort statistics stop at the visible replay
+  frame instead of revealing future samples.
+- Preserved missing optional EnergyPlus points as unavailable and excluded them
+  from compliance denominators.
+- Ran a fresh real one-day baseline and real EnergyPlus/MCP/Ollama controlled
+  case for the live dashboard. Both runs completed successfully with zero
+  EnergyPlus warnings, severe errors, or fatal errors.
+- Confirmed all 25 applied setpoint messages matched same-timestamp EnergyPlus
+  telemetry and that official controlled electricity agreed with persisted
+  telemetry to floating-point precision.
+
+### Commands and results
+
+```text
+.venv\Scripts\python.exe -m ecoloop run baseline --period smoke
+.venv\Scripts\python.exe -m ecoloop run agent --period smoke
+.venv\Scripts\python.exe -m pytest tests/integration/test_dashboard_app.py tests/integration/test_dashboard_queries.py -q
+.venv\Scripts\python.exe -m pytest -m "not real_energyplus and not real_ollama and not real_closed_loop" -q
+.venv\Scripts\ruff.exe check src tests
+.venv\Scripts\ruff.exe format --check src tests
+.venv\Scripts\mypy.exe src
+```
+
+| Check | Result |
+| --- | --- |
+| Fresh baseline | `baseline-20260726T151534Z-df519672` - completed |
+| Fresh controlled run | `agent-20260726T151601Z-4f076a27` - completed |
+| Official electricity cross-check | PASS - 238.680567 kWh; difference `8.53e-14` kWh |
+| Physical actuation audit | PASS - 25 of 25 applications matched telemetry |
+| Dashboard render audit | PASS - 6 views, 49 metrics, 9 charts, 8 data tables, zero exceptions |
+| Dashboard query/render tests | PASS - 11 tests |
+| Full non-real suite | PASS - 228 tests; 6 real tests deselected |
+| Ruff lint and format | PASS |
+| Strict mypy | PASS - 52 source files |
+| Dashboard health | PASS - HTTP 200 |
+
+The fresh smoke comparison used 217.912262 kWh for the baseline and
+238.680567 kWh for the controlled run. Facility electricity was 9.5306% higher
+and peak demand was 4.8537% higher, while occupied temperature violation fell
+from 30.3846% to 9.6154%. The dashboard presents this measured trade-off
+directly and does not label it as an energy saving.
