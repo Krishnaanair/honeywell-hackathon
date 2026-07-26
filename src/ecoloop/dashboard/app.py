@@ -212,7 +212,11 @@ def _replay_controls(database_path: Path, run_id: str) -> int | None:
     return min(cursor, total)
 
 
+@st.fragment(run_every=3.0)
 def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None) -> None:
+    refreshed_run = queries.get_run(database_path, str(run["run_id"]))
+    if refreshed_run is not None:
+        run = refreshed_run
     st.markdown("### Live Operations")
     st.caption("The latest physical state, active setpoints and control-path evidence.")
     telemetry = queries.telemetry(database_path, str(run["run_id"]), limit=limit)
@@ -254,11 +258,12 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     )
     fallback_active = fallback.casefold() not in {"", "none", "inactive", "no action"}
 
-    columns = st.columns(4)
+    columns = st.columns(5)
     columns[0].metric("Simulation clock", simulation_clock)
-    columns[1].metric("Operative temperature", _format_value(temp, " °C"))
-    columns[2].metric("Facility demand", _format_value(demand, " kW"))
-    columns[3].metric("Occupancy", _format_value(occupancy, " people"))
+    columns[1].metric("Progress", _format_value(run.get("progress_percent"), "%"))
+    columns[2].metric("Operative temperature", _format_value(temp, " °C"))
+    columns[3].metric("Facility demand", _format_value(demand, " kW"))
+    columns[4].metric("Occupancy", _format_value(occupancy, " people"))
 
     status_cols = st.columns(5)
     status_cols[0].metric("Heating setpoint", _format_value(heat_sp, " °C"))
