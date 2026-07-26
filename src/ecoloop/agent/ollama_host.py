@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -46,11 +47,21 @@ class OllamaModelBackend:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         _validate_local_ollama_host(host)
+        if os.environ.get("OLLAMA_API_KEY"):
+            raise ValueError(
+                "OLLAMA_API_KEY must be unset; EcoLoop permits only unauthenticated "
+                "loopback Ollama inference"
+            )
         if not model.strip():
             raise ValueError("model must not be empty")
         self._model = model
         self._keep_alive = keep_alive
-        self._client = AsyncClient(host=host, timeout=timeout_seconds)
+        self._client = AsyncClient(
+            host=host,
+            timeout=timeout_seconds,
+            follow_redirects=False,
+            trust_env=False,
+        )
 
     @property
     def model_name(self) -> str:

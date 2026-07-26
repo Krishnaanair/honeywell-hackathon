@@ -28,6 +28,28 @@ class CheckStatus(StrEnum):
     FAIL = "FAIL"
 
 
+class _NoOllamaRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Reject redirects so a loopback health probe cannot leave the host."""
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        del msg, newurl
+        raise urllib.error.HTTPError(
+            req.full_url,
+            code,
+            "redirect refused for local-only Ollama probe",
+            headers,
+            fp,
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class DoctorCheck:
     """One diagnostic with an actionable remediation."""
@@ -166,7 +188,7 @@ def _ollama_tags(host: str) -> tuple[tuple[str, ...] | None, str]:
         headers={"Accept": "application/json"},
     )
     try:
-        with urllib.request.urlopen(request, timeout=2.0) as response:  # noqa: S310
+        with _local_only_ollama_opener().open(request, timeout=2.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, TimeoutError, urllib.error.URLError, json.JSONDecodeError) as exc:
         return None, str(exc)
@@ -181,6 +203,15 @@ def _ollama_tags(host: str) -> tuple[tuple[str, ...] | None, str]:
         if isinstance(name, str):
             names.append(name)
     return tuple(names), ""
+
+
+def _local_only_ollama_opener() -> urllib.request.OpenerDirector:
+    """Build an opener that ignores proxy settings and refuses redirects."""
+
+    return urllib.request.build_opener(
+        urllib.request.ProxyHandler({}),
+        _NoOllamaRedirectHandler(),
+    )
 
 
 def _local_ollama_host_error(host: str) -> str | None:

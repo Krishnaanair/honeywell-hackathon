@@ -1,11 +1,22 @@
 from __future__ import annotations
 
+import io
+import urllib.error
+import urllib.request
+from email.message import Message
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from ecoloop.config import Settings
-from ecoloop.doctor import CheckStatus, _ollama_tags, run_doctor
+from ecoloop.doctor import (
+    CheckStatus,
+    _local_only_ollama_opener,
+    _NoOllamaRedirectHandler,
+    _ollama_tags,
+    run_doctor,
+)
 from ecoloop.energyplus.discovery import EnergyPlusInstallation
 
 
@@ -115,3 +126,74 @@ def test_doctor_rejects_non_local_or_ambiguous_ollama_host_without_network(
 
     assert names is None
     assert "OLLAMA_HOST" in error
+
+
+def test_doctor_opener_ignores_proxy_environment_and_rejects_redirects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example.invalid:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+
+    opener = _local_only_ollama_opener()
+    proxy_handlers = [
+        handler for handler in opener.handlers if isinstance(handler, urllib.request.ProxyHandler)
+    ]
+    redirect_handlers = [
+        handler for handler in opener.handlers if isinstance(handler, _NoOllamaRedirectHandler)
+    ]
+
+    assert urllib.request.getproxies()["http"] == "http://proxy.example.invalid:8080"
+    assert proxy_handlers == []
+    assert len(redirect_handlers) == 1
+
+    request = urllib.request.Request("http://127.0.0.1:11434/api/tags")
+    with pytest.raises(urllib.error.HTTPError, match="redirect refused"):
+        redirect_handlers[0].redirect_request(
+            request,
+            io.BytesIO(),
+            307,
+            "Temporary Redirect",
+            Message(),
+            "https://example.invalid/escaped",
+        )
+
+
+def test_doctor_uses_local_only_opener_without_global_urlopen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class JsonResponse:
+        def __enter__(self) -> JsonResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b'{"models":[{"name":"qwen3:8b"}]}'
+
+    class RecordingOpener:
+        def __init__(self) -> None:
+            self.requests: list[tuple[str, float]] = []
+
+        def open(
+            self,
+            request: urllib.request.Request,
+            *,
+            timeout: float,
+        ) -> JsonResponse:
+            self.requests.append((request.full_url, timeout))
+            return JsonResponse()
+
+    opener = RecordingOpener()
+
+    def unexpected_urlopen(*args: Any, **kwargs: Any) -> None:
+        pytest.fail(f"global urlopen must not be used: {args!r} {kwargs!r}")
+
+    monkeypatch.setattr("ecoloop.doctor._local_only_ollama_opener", lambda: opener)
+    monkeypatch.setattr("ecoloop.doctor.urllib.request.urlopen", unexpected_urlopen)
+
+    names, error = _ollama_tags("http://127.0.0.1:11434")
+
+    assert names == ("qwen3:8b",)
+    assert error == ""
+    assert opener.requests == [("http://127.0.0.1:11434/api/tags", 2.0)]
