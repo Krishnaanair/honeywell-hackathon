@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
 import signal
@@ -120,6 +121,7 @@ def run_demo(
             runtime_settings,
             period_name=period_name,
             display_delay_seconds=delay,
+            baseline_run_id=baseline_run_id,
         )
         agent_run = _wait_for_new_agent_run(
             store,
@@ -127,6 +129,11 @@ def run_demo(
             process=agent_process,
         )
         agent_run_id = agent_run.run_id
+        if agent_run.parent_run_id != baseline_run_id:
+            raise RuntimeError(
+                "controlled run did not lock to the baseline announced by the demo: "
+                f"expected {baseline_run_id}, recorded {agent_run.parent_run_id}"
+            )
         _write_current_run(runtime_settings.resolved_runs_dir(), agent_run_id)
 
         output.print(f"Dashboard: {dashboard_url}")
@@ -175,6 +182,10 @@ def _find_reusable_baseline(
     period_name: str,
 ) -> RunRecord | None:
     expected_weather = str(settings.resolved_weather_path())
+    weather_path = settings.resolved_weather_path()
+    weather_sha256 = _sha256_file(weather_path) if weather_path.is_file() else None
+    if weather_sha256 is None:
+        return None
     for run in store.list_runs(
         status=RunStatus.COMPLETED,
         run_type=RunType.BASELINE,
@@ -186,6 +197,14 @@ def _find_reusable_baseline(
             or run.energyplus_version != ENERGYPLUS_VERSION
             or run.weather_path != expected_weather
         ):
+            continue
+        preparation_fingerprint = run.metadata.get(
+            "preparation_fingerprint",
+            run.metadata.get("preparation_manifest_sha256"),
+        )
+        if not _is_sha256(preparation_fingerprint):
+            continue
+        if run.metadata.get("weather_sha256") != weather_sha256:
             continue
         try:
             load_verified_final_metrics(store, run.run_id)
@@ -205,7 +224,6 @@ def _child_environment(settings: Settings) -> dict[str, str]:
             "ECOLOOP_WEATHER_PATH": str(settings.resolved_weather_path()),
             "OLLAMA_HOST": settings.ollama_host,
             "OLLAMA_MODEL": settings.ollama_model,
-            "ECOLOOP_DASHBOARD_INCLUDE_FAKE": "0",
         }
     )
     if settings.energyplus_home is not None:
@@ -258,6 +276,7 @@ def _start_agent_run(
     *,
     period_name: str,
     display_delay_seconds: float,
+    baseline_run_id: str,
 ) -> subprocess.Popen[bytes]:
     command = [
         sys.executable,
@@ -269,6 +288,8 @@ def _start_agent_run(
         period_name,
         "--display-delay-seconds",
         str(display_delay_seconds),
+        "--baseline-run-id",
+        baseline_run_id,
     ]
     if os.name == "nt":
         return subprocess.Popen(  # noqa: S603 - fixed local executable and arguments
@@ -283,6 +304,24 @@ def _start_agent_run(
         env=_child_environment(settings),
         start_new_session=True,
     )
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _is_sha256(value: object) -> bool:
+    if not isinstance(value, str) or len(value) != 64:
+        return False
+    try:
+        bytes.fromhex(value)
+    except ValueError:
+        return False
+    return True
 
 
 def _wait_for_dashboard_start(

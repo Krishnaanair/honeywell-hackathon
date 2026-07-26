@@ -16,6 +16,7 @@ from ecoloop.schemas import (
     BuildingTelemetry,
     ClampDetail,
     MessageSeverity,
+    PhysicalActuatorApplication,
     RunStatus,
     RunType,
     ToolCallTrace,
@@ -79,7 +80,7 @@ def test_migrations_create_required_tables_and_enable_wal(store: SQLiteStore) ->
     }
     connection.close()
     assert str(journal_mode).casefold() == "wal"
-    assert user_version == 2
+    assert user_version == 3
     assert {
         "runs",
         "telemetry",
@@ -87,6 +88,7 @@ def test_migrations_create_required_tables_and_enable_wal(store: SQLiteStore) ->
         "observations",
         "proposed_actions",
         "applied_actions",
+        "actuator_applications",
         "agent_decisions",
         "tool_calls",
         "simulation_messages",
@@ -94,6 +96,93 @@ def test_migrations_create_required_tables_and_enable_wal(store: SQLiteStore) ->
         "metrics",
         "run_artifacts",
     } <= tables
+
+
+def test_physical_actuator_applications_are_append_only_and_typed(
+    store: SQLiteStore,
+) -> None:
+    _create_running_run(store)
+    physical_time = NOW + timedelta(minutes=15)
+    application = PhysicalActuatorApplication(
+        run_id="run-agent-1",
+        timestamp=NOW,
+        simulation_timestamp=physical_time,
+        action_id="action-1",
+        observation_id=1,
+        action_generation=1,
+        heating_setpoint_c=20.0,
+        cooling_setpoint_c=24.0,
+        hold_minutes=60,
+        simulation_expires_at=physical_time + timedelta(minutes=60),
+        wall_expires_at=NOW + timedelta(minutes=60),
+        validation_result="valid",
+        source="sqlite_validated_action",
+        heating_actuator_handles=(101,),
+        cooling_actuator_handles=(202,),
+    )
+
+    assert store.record_physical_actuator_application(application)
+    assert not store.record_physical_actuator_application(application)
+    assert store.get_physical_actuator_applications("run-agent-1") == [application]
+
+    conflicting = application.model_copy(update={"cooling_setpoint_c": 25.0})
+    with pytest.raises(DataConflictError, match="physical actuator application"):
+        store.record_physical_actuator_application(conflicting)
+
+    store.set_run_status("run-agent-1", RunStatus.COMPLETED)
+    with pytest.raises(RunStateError, match="running simulation"):
+        store.record_physical_actuator_application(
+            application.model_copy(update={"action_generation": 2})
+        )
+
+
+def test_legacy_physical_callback_recovery_requires_exact_one_to_one_match(
+    store: SQLiteStore,
+) -> None:
+    _create_running_run(store)
+    observed = store.record_observation(observation_input())
+    proposal = action(
+        observation_id=observed.observation_id,
+        expires_at=NOW + timedelta(minutes=120),
+    )
+    validation = ValidationResult(
+        run_id=proposal.run_id,
+        observation_id=proposal.observation_id,
+        action_generation=proposal.action_generation,
+        timestamp=NOW,
+        accepted=True,
+        proposed_action=proposal.action,
+        applied_action=proposal.action,
+        applied_expires_at=proposal.expires_at,
+    )
+    assert store.apply_validated_action(
+        proposal,
+        validation,
+        expected_run_id=proposal.run_id,
+        timestamp=NOW,
+    ).applied
+    physical_time = observed.simulation_timestamp + timedelta(minutes=15)
+    store.record_simulation_message(
+        proposal.run_id,
+        MessageSeverity.INFORMATION,
+        (
+            f"Applied thermostat actuators generation={proposal.action_generation} "
+            f"observation={proposal.observation_id} "
+            f"heating={float(proposal.action.heating_setpoint_c):.3f}C "
+            f"cooling={float(proposal.action.cooling_setpoint_c):.3f}C "
+            "source=sqlite_validated_action "
+            f"simulation_timestamp={physical_time.replace(tzinfo=None).isoformat()}"
+        ),
+        timestamp=NOW + timedelta(seconds=1),
+    )
+
+    recovered = store.get_verified_legacy_physical_actuator_applications(proposal.run_id)
+
+    assert len(recovered) == 1
+    assert recovered[0].simulation_timestamp == physical_time
+    assert recovered[0].acknowledgement_source == "legacy_verified_runtime_message"
+    assert recovered[0].heating_actuator_handles == ()
+    assert recovered[0].action_id == proposal.action_id
 
 
 def test_run_lifecycle_is_explicit_and_terminal(store: SQLiteStore) -> None:

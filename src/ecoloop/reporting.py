@@ -38,7 +38,9 @@ from reportlab.platypus import (
 )
 
 from ecoloop.config import Settings, repository_root
-from ecoloop.exceptions import RunStateError
+from ecoloop.db.store import SQLiteStore, StoreError
+from ecoloop.energyplus.replay import replay_action_sequence_from_store
+from ecoloop.exceptions import EnergyPlusIntegrationError, RunStateError
 
 
 class PackagingError(RuntimeError):
@@ -379,6 +381,9 @@ def export_run(
         output_dir.expanduser().resolve() if output_dir is not None else (run_directory / "export")
     )
     destination.mkdir(parents=True, exist_ok=True)
+    store = SQLiteStore(database)
+    replay_timing_source: str | None = None
+    replay_blocker: str | None = None
     with _connection(database) as connection:
         run = connection.execute("SELECT * FROM runs WHERE run_id = ?", (run_id,)).fetchone()
         if run is None:
@@ -388,6 +393,11 @@ def export_run(
             run_payload["data_status"] = "EXPLICIT_TEST_FAKE"
         else:
             run_payload["data_status"] = "REAL"
+        controlled_run = str(run_payload.get("run_type")) in {
+            "agent",
+            "fixed_override",
+            "rule",
+        }
         _write_json(
             destination / "run.json",
             _portable_export_value(
@@ -422,31 +432,28 @@ def export_run(
             """,
             (run_id,),
         )
-        action_rows = connection.execute(
-            """
-            SELECT observations.simulation_timestamp,
-                   applied_actions.observation_id,
-                   applied_actions.action_generation,
-                   json_extract(applied_actions.applied_values_json, '$.heating_setpoint_c')
-                       AS heating_setpoint_c,
-                   json_extract(applied_actions.applied_values_json, '$.cooling_setpoint_c')
-                       AS cooling_setpoint_c,
-                   json_extract(applied_actions.applied_values_json, '$.hold_minutes')
-                       AS hold_minutes
-            FROM applied_actions
-            JOIN observations
-              ON observations.run_id = applied_actions.run_id
-             AND observations.observation_id = applied_actions.observation_id
-            WHERE applied_actions.run_id = ?
-            ORDER BY observations.simulation_timestamp,
-                     applied_actions.action_generation,
-                     applied_actions.observation_id
-            """,
-            (run_id,),
-        ).fetchall()
+        action_rows: list[dict[str, Any]] = []
+        if controlled_run:
+            try:
+                replay_sequence = replay_action_sequence_from_store(run_id, store)
+            except (EnergyPlusIntegrationError, StoreError) as exc:
+                replay_blocker = str(exc)
+            else:
+                replay_timing_source = replay_sequence.timing_source
+                action_rows = [
+                    {
+                        "simulation_timestamp": action.simulation_timestamp,
+                        "observation_id": action.observation_id,
+                        "action_generation": action.action_generation,
+                        "heating_setpoint_c": action.heating_setpoint_c,
+                        "cooling_setpoint_c": action.cooling_setpoint_c,
+                        "hold_minutes": action.hold_minutes,
+                    }
+                    for action in replay_sequence.actions
+                ]
         _write_csv(
             destination / "action_schedule.csv",
-            [dict(row) for row in action_rows],
+            action_rows,
             fieldnames=[
                 "simulation_timestamp",
                 "observation_id",
@@ -559,11 +566,6 @@ def export_run(
         run_payload.get("model_path"),
         runs_root=runs_root,
     )
-    controlled_run = str(run_payload.get("run_type")) in {
-        "agent",
-        "fixed_override",
-        "rule",
-    }
     if controlled_run and model_source is not None:
         _copy_export_input(
             model_source,
@@ -607,6 +609,8 @@ def export_run(
         "missing_recorded_artifacts": missing,
         "missing_controlled_artifacts": missing_controlled_artifacts,
         "replay_action_count": len(action_rows),
+        "replay_timing_source": replay_timing_source,
+        "replay_blocker": replay_blocker,
         "replay_ready": controlled_run
         and not bool(run_payload["is_fake"])
         and not missing_controlled_artifacts,

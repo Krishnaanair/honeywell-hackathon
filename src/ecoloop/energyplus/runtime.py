@@ -12,6 +12,7 @@ import importlib
 import json
 import math
 import multiprocessing
+import os
 import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping
@@ -170,8 +171,9 @@ class RuntimeAction:
     validation_result: str
     hold_minutes: int = 60
     wall_expires_at: datetime | None = None
-    fallback_status: bool = False
+    fallback_status: str | None = None
     source: str = "store"
+    action_id: str | None = None
 
 
 class RuntimeStore(Protocol):
@@ -212,7 +214,7 @@ class RuntimeStore(Protocol):
         observation_id: int,
     ) -> Mapping[str, Any] | None: ...
 
-    def record_applied_action(
+    def record_physical_actuator_application(
         self,
         run_id: str,
         timestamp: str,
@@ -428,8 +430,9 @@ def action_from_mapping(value: Mapping[str, Any]) -> RuntimeAction:
         validation_result=str(value.get("validation_result", "")),
         hold_minutes=hold_minutes,
         wall_expires_at=wall_expiry,
-        fallback_status=bool(value.get("fallback_status", False)),
+        fallback_status=_fallback_status(value.get("fallback_status")),
         source=str(value.get("source", "store")),
+        action_id=(str(value["action_id"]) if value.get("action_id") else None),
     )
     for number in (action.heating_setpoint_c, action.cooling_setpoint_c):
         if not math.isfinite(number):
@@ -439,6 +442,16 @@ def action_from_mapping(value: Mapping[str, Any]) -> RuntimeAction:
     if action.observation_id < 1 or action.action_generation < 1:
         raise ValueError("Runtime action identifiers must be positive")
     return action
+
+
+def _fallback_status(value: object) -> str | None:
+    """Preserve a structured fallback label while accepting the legacy boolean."""
+
+    if value is None or value is False or value == "":
+        return None
+    if value is True:
+        return "active"
+    return str(value)
 
 
 def bind_action_to_simulation_clock(
@@ -717,12 +730,25 @@ class EnergyPlusSession:
             return True
         if not self.exchange.api_data_fully_ready(state):
             return False
-        self.registry.resolve(self.exchange, state, self.request.output_directory)
+        api_points = self.request.output_directory / "api_points.csv"
+        try:
+            self.registry.resolve(self.exchange, state, self.request.output_directory)
+        finally:
+            if api_points.is_file():
+                self.store.record_artifact(
+                    self.request.run_id,
+                    self._now_text(),
+                    "energyplus_api_points",
+                    str(api_points),
+                )
+        resolved_handles = self.registry.write_resolved_csv(
+            self.request.output_directory / "resolved_handles.csv"
+        )
         self.store.record_artifact(
             self.request.run_id,
             self._now_text(),
-            "energyplus_api_points",
-            str(self.request.output_directory / "api_points.csv"),
+            "energyplus_resolved_handles",
+            str(resolved_handles),
         )
         return True
 
@@ -810,6 +836,12 @@ class EnergyPlusSession:
                     "timestep_energy_kwh": timestep_electricity_j / 3_600_000.0,
                     "cumulative_energy_kwh": self._cumulative_electricity_kwh,
                     "runtime_electricity_signal": electricity_signal,
+                    "heating_setpoint_actuator_available": bool(
+                        self._actuator_records("heating_setpoint_c")
+                    ),
+                    "cooling_setpoint_actuator_available": bool(
+                        self._actuator_records("cooling_setpoint_c")
+                    ),
                     "environment": identity.environment,
                     "simulation_timestamp": timestamp,
                 }
@@ -861,7 +893,7 @@ class EnergyPlusSession:
                     timestamp,
                     identity.key,
                     zone_name,
-                    values,
+                    {**values, "environment": identity.environment},
                 )
             self.last_observation_id = self.store.insert_observation(
                 self.request.run_id,
@@ -1080,31 +1112,29 @@ class EnergyPlusSession:
             raise EnergyPlusIntegrationError(
                 f"Cannot apply unsupported actuators: {', '.join(missing)}"
             )
-        for record in capabilities["heating_setpoint_c"]:
-            self.exchange.set_actuator_value(
-                state,
-                record.handle,
-                action.heating_setpoint_c,
-            )
-        for record in capabilities["cooling_setpoint_c"]:
-            self.exchange.set_actuator_value(
-                state,
-                record.handle,
-                action.cooling_setpoint_c,
-            )
         applied_action = bind_action_to_simulation_clock(
             action,
             simulation_time,
             self.request.maximum_action_hold_minutes,
         )
-        self.last_generation = applied_action.action_generation
-        self.active_action = applied_action
-        self.applied_action_count += 1
-        self.store.record_applied_action(
+        for record in capabilities["heating_setpoint_c"]:
+            self.exchange.set_actuator_value(
+                state,
+                record.handle,
+                applied_action.heating_setpoint_c,
+            )
+        for record in capabilities["cooling_setpoint_c"]:
+            self.exchange.set_actuator_value(
+                state,
+                record.handle,
+                applied_action.cooling_setpoint_c,
+            )
+        self.store.record_physical_actuator_application(
             self.request.run_id,
             simulation_time.isoformat(),
             {
                 "run_id": applied_action.run_id,
+                "action_id": applied_action.action_id,
                 "observation_id": applied_action.observation_id,
                 "action_generation": applied_action.action_generation,
                 "applied_heating_setpoint_c": applied_action.heating_setpoint_c,
@@ -1123,8 +1153,17 @@ class EnergyPlusSession:
                 "validation_result": applied_action.validation_result,
                 "fallback_status": applied_action.fallback_status,
                 "source": applied_action.source,
+                "heating_actuator_handles": [
+                    record.handle for record in capabilities["heating_setpoint_c"]
+                ],
+                "cooling_actuator_handles": [
+                    record.handle for record in capabilities["cooling_setpoint_c"]
+                ],
             },
         )
+        self.last_generation = applied_action.action_generation
+        self.active_action = applied_action
+        self.applied_action_count += 1
 
     def _on_actuation(self, state: object) -> None:
         try:
@@ -1356,6 +1395,27 @@ def _execute_simulation(request: SimulationRequest) -> SimulationResult:
         store.close()
 
 
+def _isolated_request(request: SimulationRequest) -> SimulationRequest:
+    """Anchor every request path before the child leaves the parent directory."""
+
+    return replace(
+        request,
+        model_path=request.model_path.resolve(),
+        weather_path=request.weather_path.resolve(),
+        output_directory=request.output_directory.resolve(),
+        database_path=request.database_path.resolve(),
+        energyplus_home=(
+            None if request.energyplus_home is None else request.energyplus_home.resolve()
+        ),
+        actuator_map_path=(
+            None if request.actuator_map_path is None else request.actuator_map_path.resolve()
+        ),
+        replay_schedule_path=(
+            None if request.replay_schedule_path is None else request.replay_schedule_path.resolve()
+        ),
+    )
+
+
 def _child_entry(
     request: SimulationRequest,
     connection: Connection,
@@ -1364,6 +1424,11 @@ def _child_entry(
 
     started = time.monotonic()
     try:
+        # ReadVarsESO locks and removes readvars.audit in the process working
+        # directory, so concurrent runs sharing one directory corrupt each other.
+        request = _isolated_request(request)
+        request.output_directory.mkdir(parents=True, exist_ok=True)
+        os.chdir(request.output_directory)
         result = _execute_simulation(request)
     except Exception as exc:  # deliberate child-process boundary
         failure = f"{type(exc).__name__}: {exc}"

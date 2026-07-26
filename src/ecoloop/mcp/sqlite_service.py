@@ -27,9 +27,14 @@ from ecoloop.control.fallback import (
 from ecoloop.control.safety import SafetyContext, SafetyValidator
 from ecoloop.db.store import SQLiteStore
 from ecoloop.energyplus.discovery import discover_energyplus
+from ecoloop.energyplus.epw_forecast import (
+    EPWForecastError,
+    forecast_context_from_epw,
+)
 from ecoloop.energyplus.handles import normalize_point_name, parse_available_api_data
 from ecoloop.energyplus.logs import parse_error_file, severity_counts
-from ecoloop.energyplus.model import ReplayAction, write_action_schedule
+from ecoloop.energyplus.model import write_action_schedule
+from ecoloop.energyplus.replay import replay_action_sequence_from_store
 from ecoloop.exceptions import RunStateError
 from ecoloop.mcp.models import (
     OPERATIONAL_REASON_CODES,
@@ -98,33 +103,55 @@ class SQLiteMCPService:
 
     async def get_weather_forecast(self, run_id: str, hours: int) -> dict[str, Any]:
         observation = await self._observation(run_id)
-        available = any(
-            value is not None
-            for value in (
-                observation.forecast_temperature_mean_c,
-                observation.forecast_temperature_max_c,
-                observation.forecast_solar_mean_w_m2,
+        run = await asyncio.to_thread(self._store.get_run, run_id)
+        if run is None or run.weather_path is None:
+            raise ValueError(f"run has no configured weather provenance: {run_id}")
+        try:
+            context = await asyncio.to_thread(
+                forecast_context_from_epw,
+                Path(run.weather_path),
+                observation.simulation_timestamp,
+                hours,
             )
-        )
+        except EPWForecastError as exc:
+            return {
+                "run_id": run_id,
+                "hours_requested": hours,
+                "available": False,
+                "simulation_timestamp": observation.simulation_timestamp.isoformat(),
+                "features": None,
+                "points": [],
+                "source": "unavailable_configured_epw_context",
+                "error": str(exc),
+            }
+        expected_weather_sha = run.metadata.get("weather_sha256")
+        if (
+            isinstance(expected_weather_sha, str)
+            and context.file_metadata.sha256 != expected_weather_sha
+        ):
+            raise ValueError("configured EPW content no longer matches the run weather checksum")
         return {
             "run_id": run_id,
             "hours_requested": hours,
-            "available": available,
+            "available": True,
             "simulation_timestamp": observation.simulation_timestamp.isoformat(),
-            "features": (
+            "features": {
+                "temperature_mean_c": context.temperature_mean_c,
+                "temperature_max_c": context.temperature_max_c,
+                "solar_mean_w_m2": context.solar_mean_w_m2,
+            },
+            "points": [
                 {
-                    "temperature_mean_c": observation.forecast_temperature_mean_c,
-                    "temperature_max_c": observation.forecast_temperature_max_c,
-                    "solar_mean_w_m2": observation.forecast_solar_mean_w_m2,
+                    "offset_hours": point.offset_hours,
+                    "simulation_timestamp": point.timestamp.isoformat(),
+                    "drybulb_temperature_c": point.drybulb_temperature_c,
+                    "global_horizontal_solar_w_m2": (point.global_horizontal_solar_w_m2),
+                    "leap_day_fallback": point.leap_day_fallback,
                 }
-                if available
-                else None
-            ),
-            "source": (
-                "configured_epw_precomputed_features"
-                if available
-                else "unavailable_no_precomputed_epw_forecast"
-            ),
+                for point in context.points
+            ],
+            "weather_sha256": context.file_metadata.sha256,
+            "source": context.source,
         }
 
     async def get_grid_signal(self, run_id: str, hours: int) -> dict[str, Any]:
@@ -151,6 +178,16 @@ class SQLiteMCPService:
         candidates = generate_candidates(
             observation,
             constraints,
+            baseline_heating_setpoint_c=(
+                observation.baseline_reference.heating_setpoint_c
+                if observation.baseline_reference is not None
+                else None
+            ),
+            baseline_cooling_setpoint_c=(
+                observation.baseline_reference.cooling_setpoint_c
+                if observation.baseline_reference is not None
+                else None
+            ),
             hold_minutes=min(60, constraints.maximum_hold_minutes),
         )
         scores = evaluate_candidates(observation, constraints, candidates)
@@ -484,41 +521,14 @@ class SQLiteMCPService:
             raise ValueError(f"unknown run_id: {run_id}")
         if run.is_fake:
             raise ValueError("production replay generation refuses fake runs")
-        actions = await asyncio.to_thread(
-            self._store.get_applied_actions,
+        sequence = await asyncio.to_thread(
+            replay_action_sequence_from_store,
             run_id,
-            limit=10_000,
+            self._store,
         )
-        if not actions:
-            raise ValueError(f"run has no applied actions: {run_id}")
-        replay_actions: list[ReplayAction] = []
-        for proposal, validation in actions:
-            if not validation.accepted or validation.applied_action is None:
-                continue
-            observation = await asyncio.to_thread(
-                self._store.get_observation,
-                run_id,
-                proposal.observation_id,
-            )
-            if observation is None:
-                raise RuntimeError(
-                    f"applied action references missing observation {proposal.observation_id}"
-                )
-            replay_actions.append(
-                ReplayAction(
-                    simulation_timestamp=observation.simulation_timestamp.replace(
-                        tzinfo=None
-                    ).isoformat(),
-                    observation_id=proposal.observation_id,
-                    action_generation=proposal.action_generation,
-                    heating_setpoint_c=float(validation.applied_action.heating_setpoint_c),
-                    cooling_setpoint_c=float(validation.applied_action.cooling_setpoint_c),
-                    hold_minutes=validation.applied_action.hold_minutes,
-                )
-            )
         run_directory = self._settings.resolved_runs_dir() / run_id
         schedule_path = run_directory / "action_schedule.csv"
-        await asyncio.to_thread(write_action_schedule, replay_actions, schedule_path)
+        await asyncio.to_thread(write_action_schedule, sequence.actions, schedule_path)
         prepared_replay = await asyncio.to_thread(
             lambda: (
                 Path(run.model_path).resolve()
@@ -545,11 +555,12 @@ class SQLiteMCPService:
         return {
             "generated": True,
             "run_id": run_id,
-            "action_count": len(replay_actions),
+            "action_count": len(sequence.actions),
             "action_schedule": str(schedule_path),
             "replay_model": str(replay_path),
             "preparation_manifest": str(replay_manifest),
-            "method": "runtime_schedule_replay_without_local_model_inference",
+            "method": "runtime_schedule_replay_from_physical_acknowledgements",
+            "timing_source": sequence.timing_source,
         }
 
     async def audit_tool_call(self, event: AuditEvent) -> None:
@@ -562,16 +573,64 @@ class SQLiteMCPService:
         observation = await asyncio.to_thread(self._store.get_current_observation, run_id)
         if observation is None:
             raise ValueError(f"run has no current observation: {run_id}")
-        if observation.baseline_reference is not None:
-            return observation
-        reference = await asyncio.to_thread(
-            self._aligned_baseline_reference,
+        updates: dict[str, Any] = {}
+        if observation.baseline_reference is None:
+            reference = await asyncio.to_thread(
+                self._aligned_baseline_reference,
+                run_id,
+                observation,
+            )
+            if reference is not None:
+                updates["baseline_reference"] = reference
+        recent = await asyncio.to_thread(
+            self._store.get_recent_observations,
             run_id,
-            observation,
+            limit=8,
         )
-        if reference is None:
-            return observation
-        return observation.model_copy(update={"baseline_reference": reference})
+        updates["recent_trends"] = _observation_trends(recent)
+        physical = await asyncio.to_thread(
+            self._store.get_physical_actuator_applications,
+            run_id,
+            limit=10_000,
+        )
+        if physical:
+            latest = physical[-1]
+            updates["previous_action"] = CandidateAction(
+                candidate_id=f"physical-{latest.action_generation}",
+                heating_setpoint_c=latest.heating_setpoint_c,
+                cooling_setpoint_c=latest.cooling_setpoint_c,
+                hold_minutes=latest.hold_minutes,
+            )
+        if (
+            observation.forecast_temperature_mean_c is None
+            and observation.forecast_temperature_max_c is None
+        ):
+            run = await asyncio.to_thread(self._store.get_run, run_id)
+            if run is not None and run.weather_path is not None:
+                try:
+                    forecast = await asyncio.to_thread(
+                        forecast_context_from_epw,
+                        Path(run.weather_path),
+                        observation.simulation_timestamp,
+                        6,
+                    )
+                except EPWForecastError:
+                    pass
+                else:
+                    expected_sha = run.metadata.get("weather_sha256")
+                    if not isinstance(expected_sha, str) or (
+                        forecast.file_metadata.sha256 == expected_sha
+                    ):
+                        updates.update(
+                            {
+                                "forecast_temperature_mean_c": (forecast.temperature_mean_c),
+                                "forecast_temperature_max_c": (forecast.temperature_max_c),
+                                "forecast_solar_mean_w_m2": forecast.solar_mean_w_m2,
+                            }
+                        )
+        payload = observation.model_dump(mode="python")
+        payload.update(updates)
+        return BuildingObservation.model_validate(payload)
 
     def _aligned_baseline_reference(
         self,
@@ -602,11 +661,26 @@ class SQLiteMCPService:
             parent.metadata.get("preparation_manifest_sha256"),
         )
         if (
-            run_fingerprint is not None
-            and parent_fingerprint is not None
-            and run_fingerprint != parent_fingerprint
+            not isinstance(run_fingerprint, str)
+            or not isinstance(parent_fingerprint, str)
+            or run_fingerprint != parent_fingerprint
+            or run.metadata.get("weather_sha256") is None
+            or run.metadata.get("weather_sha256") != parent.metadata.get("weather_sha256")
         ):
             return None
+        if not run.is_fake:
+            parent_metrics = self._store.get_metrics(parent.run_id, verified_only=True)
+            finalization = parent_metrics.get("finalization_verification", {}).get("value")
+            final_metrics = parent_metrics.get("final_run_metrics")
+            cross_check = parent_metrics.get("energy_cross_check", {}).get("value")
+            if (
+                not isinstance(finalization, dict)
+                or finalization.get("verified_for_comparison") is not True
+                or final_metrics is None
+                or not isinstance(cross_check, dict)
+                or cross_check.get("passed") is not True
+            ):
+                return None
         candidates = self._store.get_recent_observations(parent.run_id, limit=10_000)
         matched = next(
             (
@@ -684,6 +758,16 @@ class SQLiteMCPService:
         sequence += 1
         self._audit_sequences[run_id] = sequence
         observation_id = event.arguments.get("observation_id")
+        if not isinstance(observation_id, int) and event.result is not None:
+            result_observation_id = event.result.get("observation_id")
+            nested_observation = event.result.get("observation")
+            if isinstance(result_observation_id, int):
+                observation_id = result_observation_id
+            elif isinstance(nested_observation, dict) and isinstance(
+                nested_observation.get("observation_id"),
+                int,
+            ):
+                observation_id = nested_observation["observation_id"]
         trace = ToolCallTrace(
             call_id=f"mcp-{uuid.uuid4().hex}",
             run_id=run_id,

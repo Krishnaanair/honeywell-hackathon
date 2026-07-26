@@ -118,7 +118,11 @@ def test_comparison_status_accepts_distinct_prepared_models_with_same_fingerprin
         store.upsert_metric(
             run_id,
             "final_run_metrics",
-            value_json={"run_id": run_id},
+            value_json={
+                "run_id": run_id,
+                "simulation_start": now.isoformat(),
+                "simulation_end": (now + timedelta(days=1)).isoformat(),
+            },
             source="test-official",
             verified=True,
             timestamp=now,
@@ -143,6 +147,22 @@ def test_comparison_status_accepts_distinct_prepared_models_with_same_fingerprin
     allowed, message = queries.compare_status(database, "baseline", "agent")
     assert allowed
     assert "compatible" in message.lower()
+
+    store.upsert_metric(
+        "agent",
+        "final_run_metrics",
+        value_json={
+            "run_id": "agent",
+            "simulation_start": now.isoformat(),
+            "simulation_end": (now + timedelta(days=1, minutes=15)).isoformat(),
+        },
+        source="test-window-mismatch",
+        verified=True,
+        timestamp=now,
+    )
+    allowed, message = queries.compare_status(database, "baseline", "agent")
+    assert not allowed
+    assert "simulation windows" in message.lower()
 
 
 def test_comparison_status_requires_matching_weather_checksum_and_publication_checks(
@@ -461,7 +481,14 @@ def _seed_statistics_run(tmp_path):
             timestamp=now,
         )
     for name, payload in (
-        ("final_run_metrics", {"run_id": "agent-real"}),
+        (
+            "final_run_metrics",
+            {
+                "run_id": "agent-real",
+                "simulation_start": now.isoformat(),
+                "simulation_end": (now + timedelta(minutes=30)).isoformat(),
+            },
+        ),
         ("energy_cross_check", {"passed": True}),
         ("finalization_verification", {"verified_for_comparison": True}),
     ):
@@ -571,7 +598,14 @@ def test_comparison_statistics_requires_compatible_verified_real_runs(tmp_path):
             timestamp=now,
         )
     for name, payload in (
-        ("final_run_metrics", {"run_id": "baseline-real"}),
+        (
+            "final_run_metrics",
+            {
+                "run_id": "baseline-real",
+                "simulation_start": now.isoformat(),
+                "simulation_end": (now + timedelta(minutes=30)).isoformat(),
+            },
+        ),
         ("energy_cross_check", {"passed": True}),
         ("finalization_verification", {"verified_for_comparison": True}),
     ):

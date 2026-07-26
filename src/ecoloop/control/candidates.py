@@ -125,6 +125,8 @@ def score_candidate(
     observation: BuildingObservation,
     constraints: ControlConstraints,
     candidate: CandidateAction,
+    *,
+    action_change_penalty_per_c: float = 0.15,
 ) -> CandidateScore:
     """Score one candidate with an explicit one-step engineering heuristic.
 
@@ -135,6 +137,8 @@ def score_candidate(
 
     if observation.run_id != constraints.run_id:
         raise ValueError("observation and constraints must belong to the same run")
+    if not math.isfinite(action_change_penalty_per_c) or action_change_penalty_per_c < 0:
+        raise ValueError("action_change_penalty_per_c must be finite and non-negative")
     capabilities = constraints.capabilities
     unsupported_optional = (
         (candidate.ventilation_multiplier is not None and not capabilities.ventilation_multiplier)
@@ -165,8 +169,8 @@ def score_candidate(
         else observation.zone_temperature_mean_c
     )
     temperature_trend = observation.recent_trends.get(
-        "operative_temperature_c"
-    ) or observation.recent_trends.get("zone_temperature_c")
+        "operative_temperature_mean_c"
+    ) or observation.recent_trends.get("zone_temperature_mean_c")
     slope_per_hour = float(temperature_trend.slope_per_hour) if temperature_trend else 0.0
     hold_hours = candidate.hold_minutes / 60.0
     outdoor = (
@@ -254,7 +258,7 @@ def score_candidate(
         tariff_penalty = estimated_interval_kwh * float(observation.tariff_per_kwh) * 0.5
         carbon_penalty = estimated_interval_kwh * float(observation.carbon_kg_per_kwh) * 0.1
 
-    action_change_penalty = 1.5 * (
+    action_change_penalty = action_change_penalty_per_c * (
         abs(float(candidate.heating_setpoint_c) - float(observation.heating_setpoint_c))
         + abs(float(candidate.cooling_setpoint_c) - float(observation.cooling_setpoint_c))
     )
@@ -292,6 +296,7 @@ def score_candidate(
             "one-step linear temperature trend",
             "8% per-hour outdoor coupling",
             "fixed setpoint-to-demand sensitivity",
+            f"{action_change_penalty_per_c:g} score units per C action change",
             "lower score is preferred; this is not MPC",
         ),
     )

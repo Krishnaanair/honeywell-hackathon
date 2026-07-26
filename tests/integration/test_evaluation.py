@@ -465,6 +465,27 @@ def test_comparison_requires_verified_compatible_runs_and_writes_files(
 
 
 @pytest.mark.integration
+def test_comparison_refuses_different_finalized_simulation_window(
+    tmp_path: Path,
+) -> None:
+    store, _, _ = _finalized_pair(tmp_path)
+    payload = dict(store.get_metrics("agent")["final_run_metrics"]["value"])
+    payload["simulation_end"] = (
+        datetime.fromisoformat(str(payload["simulation_end"])) + timedelta(minutes=15)
+    ).isoformat()
+    store.upsert_metric(
+        "agent",
+        "final_run_metrics",
+        value_json=payload,
+        source="test-window-mutation",
+        verified=True,
+    )
+
+    with pytest.raises(EvaluationError, match="simulation windows do not match"):
+        compare_and_write(store, "baseline", "agent")
+
+
+@pytest.mark.integration
 def test_failed_energy_crosscheck_is_persisted_but_not_publishable(
     tmp_path: Path,
 ) -> None:

@@ -38,6 +38,12 @@ def main() -> None:
         "true",
         "yes",
     }
+    if replay_enabled and not replay_run_id:
+        st.error(
+            "Replay mode requires ECOLOOP_DEMO_REPLAY_RUN_ID to identify a "
+            "completed, verified real controlled run."
+        )
+        return
 
     try:
         runs = queries.list_runs(database_path, include_fake=False)
@@ -53,13 +59,29 @@ def main() -> None:
         st.info("No real runs exist. Fake test runs are intentionally hidden.")
         return
 
-    run_id = _select_run(runs, replay_run_id if replay_enabled else None)
+    run_id = _select_run(
+        runs,
+        replay_run_id if replay_enabled else None,
+        preferred=_read_current_run_id(settings.resolved_runs_dir()),
+    )
     run = queries.get_run(database_path, run_id)
     if run is None:
         st.error(f"Run disappeared: {run_id}")
         return
+    verified = queries.verified_metrics(database_path, run_id)
+    verified_evidence = _has_verified_evidence(verified)
+    if replay_enabled and not (_is_completed_controlled_run(run) and verified_evidence):
+        st.error(
+            "Replay is restricted to a completed, verified real controlled run "
+            "with a passing official-energy cross-check."
+        )
+        return
 
-    _brand_header(run, replay_enabled=replay_enabled)
+    _brand_header(
+        run,
+        replay_enabled=replay_enabled,
+        verified_evidence=verified_evidence,
+    )
     _run_context(run, replay_enabled=replay_enabled)
     frame_limit = _replay_controls(database_path, run_id) if replay_enabled else None
 
@@ -80,9 +102,9 @@ def main() -> None:
     with tabs[2]:
         _comfort(database_path, run_id, frame_limit)
     with tabs[3]:
-        _decisions(database_path, run_id)
+        _decisions(database_path, run_id, run_type=str(run.get("run_type") or ""))
     with tabs[4]:
-        _reliability(database_path, run_id)
+        _reliability(database_path, run_id, run_type=str(run.get("run_type") or ""))
     with tabs[5]:
         _methodology()
 
@@ -104,7 +126,12 @@ def main() -> None:
         st.rerun()
 
 
-def _brand_header(run: dict[str, Any], *, replay_enabled: bool) -> None:
+def _brand_header(
+    run: dict[str, Any],
+    *,
+    replay_enabled: bool,
+    verified_evidence: bool,
+) -> None:
     status = str(run.get("status") or "unknown").casefold()
     if replay_enabled:
         mode_label = "REAL RUN REPLAY"
@@ -115,9 +142,14 @@ def _brand_header(run: dict[str, Any], *, replay_enabled: bool) -> None:
         mode_detail = "EnergyPlus telemetry · control loop active"
         mode_class = "mode-live"
     elif status == "completed":
-        mode_label = "COMPLETED EVIDENCE"
-        mode_detail = "Immutable run record · verified outputs"
-        mode_class = "mode-complete"
+        if verified_evidence:
+            mode_label = "COMPLETED EVIDENCE"
+            mode_detail = "Finalized audit record · official energy cross-check passed"
+            mode_class = "mode-complete"
+        else:
+            mode_label = "COMPLETED RUN"
+            mode_detail = "Final evidence verification unavailable or failed"
+            mode_class = "mode-neutral"
     else:
         mode_label = status.upper()
         mode_detail = "Run record · inspect status below"
@@ -196,7 +228,12 @@ def _run_context(run: dict[str, Any], *, replay_enabled: bool) -> None:
     st.sidebar.caption(f"EnergyPlus {escape(str(run.get('energyplus_version') or 'unknown'))}")
 
 
-def _select_run(runs: pd.DataFrame, forced: str | None) -> str:
+def _select_run(
+    runs: pd.DataFrame,
+    forced: str | None,
+    *,
+    preferred: str | None,
+) -> str:
     st.sidebar.markdown(
         """
         <div class="sidebar-brand">
@@ -224,8 +261,58 @@ def _select_run(runs: pd.DataFrame, forced: str | None) -> str:
     return st.sidebar.selectbox(
         "Current real run",
         choices,
+        index=_preferred_run_index(runs, preferred),
         format_func=lambda value: labels[value],
     )
+
+
+def _read_current_run_id(runs_directory: Path) -> str | None:
+    """Read the demo-selected run ID without trusting stale or empty content."""
+
+    try:
+        run_id = (runs_directory / "current_run.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return run_id or None
+
+
+def _preferred_run_index(runs: pd.DataFrame, preferred: str | None) -> int:
+    """Choose current evidence, then the latest completed controlled run."""
+
+    normalized = runs.reset_index(drop=True)
+    if preferred:
+        matching = normalized[
+            (normalized["run_id"].astype(str) == preferred)
+            & (normalized["is_fake"].fillna(1).astype(int) == 0)
+        ]
+        if not matching.empty:
+            return int(matching.index[0])
+
+    completed = normalized[normalized["status"].astype(str).str.casefold().eq("completed")]
+    for run_type in ("agent", "rule", "replay", "fixed_override", "baseline"):
+        matching = completed[completed["run_type"].astype(str).str.casefold().eq(run_type)]
+        if not matching.empty:
+            return int(matching.index[0])
+    return 0
+
+
+def _is_completed_controlled_run(run: dict[str, Any]) -> bool:
+    """Return whether a run is real, completed, and physically controlled."""
+
+    controlled_types = {"agent", "rule", "replay", "fixed_override"}
+    return (
+        not bool(run.get("is_fake"))
+        and str(run.get("status") or "").casefold() == "completed"
+        and str(run.get("run_type") or "").casefold() in controlled_types
+    )
+
+
+def _has_verified_evidence(metrics: dict[str, dict[str, Any]]) -> bool:
+    """Require both run finalization and the official energy cross-check."""
+
+    finalization = _structured_metric(metrics, "finalization_verification")
+    cross_check = _structured_metric(metrics, "energy_cross_check")
+    return finalization.get("verified_for_comparison") is True and cross_check.get("passed") is True
 
 
 def _replay_controls(database_path: Path, run_id: str) -> int | None:
@@ -305,6 +392,7 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
         else "no action"
     )
     fallback_active = fallback.casefold() not in {"", "none", "inactive", "no action"}
+    run_type = str(run.get("run_type") or "").casefold()
 
     _telemetry_banner(
         run_status=str(run.get("status") or "unknown"),
@@ -337,7 +425,12 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     control_cols[2].metric("Maximum |PMV|", _format_value(pmv_abs))
     control_cols[3].metric("Latest decision latency", _format_duration_ms(latency))
 
-    if fallback_active and str(run.get("status")).casefold() == "running":
+    if run_type == "rule":
+        st.info(
+            "Deterministic rule-controller mode · bounded setpoint actions are "
+            "generated without model inference."
+        )
+    elif fallback_active and str(run.get("status")).casefold() == "running":
         st.warning(f"Deterministic fallback active · {fallback.replace('_', ' ').title()}")
     elif fallback_active:
         st.info(
@@ -456,7 +549,11 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
 
     _subsection_header(
         "Control audit",
-        "The latest controller proposal, physically applied values and MCP calls.",
+        (
+            "Deterministic rule proposals and physically applied values."
+            if run_type == "rule"
+            else "The latest controller proposal, physically applied values and MCP calls."
+        ),
     )
     left, right = st.columns((0.9, 1.1), gap="large")
     with left:
@@ -499,7 +596,10 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     with right:
         st.markdown("#### Recent MCP tool trace")
         if tools.empty:
-            st.caption("No MCP tool calls yet.")
+            if run_type == "rule":
+                st.caption("Rule-controller mode does not invoke model-facing MCP tools.")
+            else:
+                st.caption("No MCP tool calls yet.")
         else:
             tool_view = tools[
                 ["timestamp", "tool_name", "success", "duration_ms", "control_affecting"]
@@ -918,20 +1018,31 @@ def _comfort(database_path: Path, run_id: str, limit: int | None) -> None:
         )
 
 
-def _decisions(database_path: Path, run_id: str) -> None:
+def _decisions(database_path: Path, run_id: str, *, run_type: str) -> None:
+    is_rule = run_type.casefold() == "rule"
     _section_header(
-        "Agent Decisions",
+        "Rule Controller Actions" if is_rule else "Agent Decisions",
         eyebrow="CONTROL TRACE",
         description=(
-            "Operational explanations, candidate evaluations and deterministic "
-            "validation from the audited tool loop."
+            "Deterministic bounded setpoint actions and independent safety validation."
+            if is_rule
+            else (
+                "Operational explanations, candidate evaluations and deterministic "
+                "validation from the audited tool loop."
+            )
         ),
     )
     decisions = queries.recent_decisions(database_path, run_id, limit=10_000)
     actions = queries.recent_actions(database_path, run_id, limit=10_000)
     tools = queries.recent_tool_calls(database_path, run_id, limit=10_000)
     if decisions.empty:
-        st.info("No decision records exist for this run.")
+        if is_rule:
+            st.info(
+                "This deterministic rule-controller run does not invoke the local "
+                "model; its physically applied controls are shown below."
+            )
+        else:
+            st.info("No decision records exist for this run.")
     else:
         applied_count = (
             int(actions["applied"].fillna(0).sum())
@@ -1035,7 +1146,11 @@ def _decisions(database_path: Path, run_id: str) -> None:
                 hide_index=True,
                 width="stretch",
             )
-    st.markdown("#### Proposed versus safety-applied actions")
+    st.markdown(
+        "#### Rule-controller action record"
+        if is_rule
+        else "#### Proposed versus safety-applied actions"
+    )
     if actions.empty:
         st.caption("No actions exist for this run.")
     else:
@@ -1058,7 +1173,10 @@ def _decisions(database_path: Path, run_id: str) -> None:
         )
     st.markdown("#### MCP tools called")
     if tools.empty:
-        st.caption("No tool-call trace exists for this run.")
+        if is_rule:
+            st.caption("Rule-controller mode does not invoke model-facing MCP tools.")
+        else:
+            st.caption("No tool-call trace exists for this run.")
     else:
         tool_counts = (
             tools.groupby("tool_name", as_index=False)
@@ -1110,13 +1228,21 @@ def _decisions(database_path: Path, run_id: str) -> None:
             )
 
 
-def _reliability(database_path: Path, run_id: str) -> None:
+def _reliability(database_path: Path, run_id: str, *, run_type: str) -> None:
+    is_rule = run_type.casefold() == "rule"
     _section_header(
         "Reliability and Errors",
         eyebrow="EVIDENCE HEALTH",
         description=(
-            "Timeout recovery, safety intervention, protocol health and EnergyPlus "
-            "diagnostics kept in separate audit channels."
+            (
+                "Deterministic rule execution, safety intervention and EnergyPlus "
+                "diagnostics kept in separate audit channels."
+            )
+            if is_rule
+            else (
+                "Timeout recovery, safety intervention, protocol health and EnergyPlus "
+                "diagnostics kept in separate audit channels."
+            )
         ),
     )
     tools = queries.recent_tool_calls(database_path, run_id, limit=10_000)
@@ -1174,13 +1300,21 @@ def _reliability(database_path: Path, run_id: str) -> None:
     )
     recovery_cards = st.columns(5)
     recovery_cards[0].metric("Timeouts", timeout_count)
-    recovery_cards[1].metric("Fallbacks", fallback_count)
+    recovery_cards[1].metric(
+        "Deterministic rule actions" if is_rule else "Fallbacks",
+        fallback_count,
+    )
     recovery_cards[2].metric("Invalid actions", invalid_count)
     recovery_cards[3].metric("Safety clamps", clamp_count)
     recovery_cards[4].metric(
         "Failed tools",
         int((tools["success"] == 0).sum()) if not tools.empty else 0,
     )
+    if is_rule:
+        st.caption(
+            "Rule actions use the shared safe-action audit field; they are planned "
+            "deterministic controls, not model failures."
+        )
 
     evidence_cards = st.columns(4)
     evidence_cards[0].metric(

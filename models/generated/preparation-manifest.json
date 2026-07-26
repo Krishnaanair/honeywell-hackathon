@@ -55,6 +55,18 @@
   },
   "energyplus_distribution": "EnergyPlus 26.1.0; installation is discovered locally at runtime",
   "energyplus_version": "26.1.0",
+  "generated_artifacts": {
+    "actuator_map_sha256": "a45b0997295f09a9d238f66d54a4213b362548a86891a49880873bc7386426ce",
+    "agent_ready_idf_sha256": "0d606e4fddcb984881539fcc54f711a0d019ad395a5ed0245f3213d8cbd7ee5d",
+    "agent_replay_idf_sha256": "0d606e4fddcb984881539fcc54f711a0d019ad395a5ed0245f3213d8cbd7ee5d",
+    "baseline_idf_sha256": "ca30f08001566068b73928c79b4dda046f70960f99b6e0e4e0f227f06c0d9dad"
+  },
+  "period": {
+    "end_day": 15,
+    "end_month": 7,
+    "start_day": 15,
+    "start_month": 7
+  },
   "replay_method": "EnergyPlus Runtime API applies action_schedule.csv to the same discovered schedule actuators; no local model inference is called.",
   "runtime_electricity_signals": {
     "fallback": "ElectricityNet:Facility",

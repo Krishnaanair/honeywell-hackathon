@@ -478,6 +478,20 @@ def compare_status(
         finalization = _metric_payload(metrics, "finalization_verification")
         if finalization.get("verified_for_comparison") is not True:
             return False, f"{label} finalization is not verified for comparison."
+    baseline_final = _metric_payload(baseline_metrics, "final_run_metrics")
+    controlled_final = _metric_payload(controlled_metrics, "final_run_metrics")
+    baseline_window = (
+        baseline_final.get("simulation_start"),
+        baseline_final.get("simulation_end"),
+    )
+    controlled_window = (
+        controlled_final.get("simulation_start"),
+        controlled_final.get("simulation_end"),
+    )
+    if any(value is None for value in (*baseline_window, *controlled_window)):
+        return False, "Finalized simulation-window provenance is missing."
+    if baseline_window != controlled_window:
+        return False, "Finalized simulation windows do not match."
     return True, "Compatible completed real runs."
 
 

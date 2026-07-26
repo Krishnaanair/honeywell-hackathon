@@ -12,6 +12,7 @@ from ecoloop.schemas import (
     CandidateAction,
     EnergyCrossCheck,
     FinalRunMetrics,
+    PhysicalActuatorApplication,
     RunStatus,
     RunType,
     ToolCallTrace,
@@ -66,6 +67,42 @@ def test_actuator_capabilities_default_to_unsupported() -> None:
     capabilities = ActuatorCapabilities()
     assert not capabilities.heating_setpoint
     assert not capabilities.ventilation_multiplier
+
+
+def test_physical_application_requires_actual_handles_and_exact_simulated_expiry() -> None:
+    callback_time = NOW + timedelta(minutes=15)
+    common = {
+        "run_id": "run-1",
+        "timestamp": NOW,
+        "simulation_timestamp": callback_time,
+        "observation_id": 1,
+        "action_generation": 1,
+        "heating_setpoint_c": 20.0,
+        "cooling_setpoint_c": 24.0,
+        "hold_minutes": 60,
+        "simulation_expires_at": callback_time + timedelta(minutes=60),
+        "validation_result": "valid",
+        "source": "sqlite_validated_action",
+        "heating_actuator_handles": (101,),
+        "cooling_actuator_handles": (202,),
+    }
+    application = PhysicalActuatorApplication(**common)
+    assert application.simulation_timestamp == callback_time
+
+    with pytest.raises(ValidationError, match="requires both actuator handle sets"):
+        PhysicalActuatorApplication(
+            **{
+                **common,
+                "heating_actuator_handles": (),
+            }
+        )
+    with pytest.raises(ValidationError, match="plus hold_minutes"):
+        PhysicalActuatorApplication(
+            **{
+                **common,
+                "simulation_expires_at": callback_time + timedelta(minutes=45),
+            }
+        )
 
 
 def test_failed_tool_trace_requires_a_bounded_error() -> None:

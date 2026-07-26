@@ -22,7 +22,12 @@ from ecoloop.reporting import (
     export_run,
     render_text_pdf,
 )
-from ecoloop.schemas import RunStatus, RunType, ValidationResult
+from ecoloop.schemas import (
+    PhysicalActuatorApplication,
+    RunStatus,
+    RunType,
+    ValidationResult,
+)
 from tests.unit._factories import NOW, action, candidate, observation_input
 
 
@@ -281,6 +286,26 @@ def test_export_run_writes_exact_replay_inputs_from_immutable_real_run(
         timestamp=NOW + timedelta(minutes=5),
     )
     assert application.applied
+    physical_time = NOW + timedelta(minutes=15)
+    store.record_physical_actuator_application(
+        PhysicalActuatorApplication(
+            run_id=run_id,
+            timestamp=NOW + timedelta(minutes=5),
+            simulation_timestamp=physical_time,
+            action_id=proposal.action_id,
+            observation_id=proposal.observation_id,
+            action_generation=proposal.action_generation,
+            heating_setpoint_c=20.5,
+            cooling_setpoint_c=24.5,
+            hold_minutes=60,
+            simulation_expires_at=physical_time + timedelta(minutes=60),
+            wall_expires_at=proposal.expires_at,
+            validation_result="valid",
+            source="sqlite_validated_action",
+            heating_actuator_handles=(101,),
+            cooling_actuator_handles=(202,),
+        )
+    )
     store.set_run_status(run_id, RunStatus.COMPLETED, timestamp=NOW + timedelta(hours=1))
     store.record_artifact(
         run_id,
@@ -308,10 +333,9 @@ def test_export_run_writes_exact_replay_inputs_from_immutable_real_run(
     with (output / "action_schedule.csv").open(encoding="utf-8", newline="") as handle:
         schedule = list(csv.DictReader(handle))
     assert len(schedule) == 1
-    assert (
-        datetime.fromisoformat(schedule[0].pop("simulation_timestamp").replace("Z", "+00:00"))
-        == NOW
-    )
+    assert datetime.fromisoformat(
+        schedule[0].pop("simulation_timestamp").replace("Z", "+00:00")
+    ) == physical_time.replace(tzinfo=None)
     assert schedule == [
         {
             "observation_id": str(observed.observation_id),
@@ -327,6 +351,8 @@ def test_export_run_writes_exact_replay_inputs_from_immutable_real_run(
     manifest = json.loads((output / "export-manifest.json").read_text(encoding="utf-8"))
     assert manifest["replay_action_count"] == 1
     assert manifest["replay_ready"] is True
+    assert manifest["replay_timing_source"] == "structured_runtime_callback"
+    assert manifest["replay_blocker"] is None
     assert manifest["missing_controlled_artifacts"] == []
     assert manifest["energyplus_output_preserved"] is True
     metrics_json = json.loads((output / "metrics.json").read_text(encoding="utf-8"))
@@ -344,6 +370,75 @@ def test_export_run_writes_exact_replay_inputs_from_immutable_real_run(
     for path in output.iterdir():
         if path.suffix.casefold() in {".csv", ".idf", ".json", ".jsonl"}:
             assert host_root not in path.read_text(encoding="utf-8")
+
+
+def test_export_marks_queued_action_without_physical_acknowledgement_non_replayable(
+    tmp_path: Path,
+) -> None:
+    run_id = "agent-without-physical-ack"
+    runs_directory = tmp_path / "runs"
+    database = runs_directory / "ecoloop.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    store.create_run(
+        run_id,
+        RunType.AGENT,
+        is_fake=False,
+        energyplus_version="26.1.0",
+        period_name="smoke",
+        timestamp=NOW,
+    )
+    store.set_run_status(run_id, RunStatus.RUNNING, timestamp=NOW)
+    observed = store.record_observation(
+        observation_input(
+            run_id=run_id,
+            simulation_timestamp=NOW,
+            timestep_key="missing-ack-step",
+        )
+    )
+    applied = candidate(
+        candidate_id="queued-only-candidate",
+        heating_setpoint_c=20.5,
+        cooling_setpoint_c=24.5,
+        hold_minutes=60,
+    )
+    proposal = action(
+        action_id="queued-only-action",
+        run_id=run_id,
+        observation_id=observed.observation_id,
+        timestamp=NOW + timedelta(minutes=5),
+        expires_at=NOW + timedelta(hours=1),
+        action=applied,
+    )
+    validation = ValidationResult(
+        run_id=run_id,
+        observation_id=observed.observation_id,
+        action_generation=1,
+        timestamp=NOW + timedelta(minutes=5),
+        accepted=True,
+        proposed_action=applied,
+        applied_action=applied,
+        applied_expires_at=NOW + timedelta(hours=1),
+    )
+    result = store.apply_validated_action(
+        proposal,
+        validation,
+        expected_run_id=run_id,
+        timestamp=NOW + timedelta(minutes=5),
+    )
+    assert result.applied
+    store.set_run_status(run_id, RunStatus.COMPLETED, timestamp=NOW + timedelta(hours=1))
+
+    output = export_run(database, runs_directory, run_id)
+
+    manifest = json.loads((output / "export-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["replay_action_count"] == 0
+    assert manifest["replay_ready"] is False
+    assert manifest["replay_timing_source"] is None
+    assert "physical actuator audit is incomplete" in manifest["replay_blocker"]
+    assert (output / "action_schedule.csv").read_text(encoding="utf-8").splitlines() == [
+        "simulation_timestamp,observation_id,action_generation,"
+        "heating_setpoint_c,cooling_setpoint_c,hold_minutes"
+    ]
 
 
 def test_export_run_rejects_run_id_path_traversal_before_creating_output(

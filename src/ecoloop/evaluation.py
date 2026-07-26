@@ -328,6 +328,16 @@ def compare_and_write(
     )
     baseline = load_verified_final_metrics(store, baseline_run_id)
     controlled = load_verified_final_metrics(store, controlled_run_id)
+    if (
+        baseline.simulation_start != controlled.simulation_start
+        or baseline.simulation_end != controlled.simulation_end
+    ):
+        raise EvaluationError(
+            "finalized simulation windows do not match exactly "
+            f"({baseline.simulation_start.isoformat()}..{baseline.simulation_end.isoformat()} "
+            f"versus {controlled.simulation_start.isoformat()}.."
+            f"{controlled.simulation_end.isoformat()})"
+        )
     now = timestamp or utc_now()
     try:
         comparison = compare_completed_runs(baseline, controlled, timestamp=now)

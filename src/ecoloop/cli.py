@@ -119,6 +119,14 @@ def run_case_command(
             help="Wall-clock display delay; simulated timestamps and energy are unchanged.",
         ),
     ] = 0.0,
+    baseline_run_id: Annotated[
+        str | None,
+        typer.Option(
+            help=(
+                "Lock a controlled run to this completed, verified, provenance-compatible baseline."
+            ),
+        ),
+    ] = None,
 ) -> None:
     """Run a baseline, deterministic-rule, or local-model EnergyPlus case."""
 
@@ -131,6 +139,7 @@ def run_case_command(
             settings=_settings(),
             fake=fake,
             display_delay_seconds=display_delay_seconds,
+            baseline_run_id=baseline_run_id,
         )
     except (OSError, RuntimeError, ValueError) as exc:
         _fail(str(exc))
@@ -180,18 +189,10 @@ def compare(
 def dashboard(
     port: Annotated[int, typer.Option(min=1, max=65535)] = 8501,
     address: Annotated[str, typer.Option()] = "127.0.0.1",
-    include_fake: Annotated[
-        bool,
-        typer.Option(
-            "--include-fake",
-            help="Expose explicitly labelled test runs in the dashboard selector.",
-        ),
-    ] = False,
 ) -> None:
     """Launch the real-data Streamlit operations dashboard."""
 
     environment = os.environ.copy()
-    environment["ECOLOOP_DASHBOARD_INCLUDE_FAKE"] = "1" if include_fake else "0"
     dashboard_path = repository_root() / "src" / "ecoloop" / "dashboard" / "app.py"
     command = [
         sys.executable,
