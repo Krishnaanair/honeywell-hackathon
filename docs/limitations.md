@@ -36,6 +36,14 @@ cooling setpoint, and hold duration.
   improved occupied-temperature compliance but used 10.524% more facility
   electricity and raised peak demand by 5.315%. Before broader evaluation, the
   policy needs a stronger energy/demand penalty and multi-period tuning.
+- A post-run attribution found that the complete 118.604 kWh facility increase
+  was HVAC electricity. Operation at 19/23 C contributed 123.749 kWh above the
+  matched baseline intervals, while all other setpoint combinations together
+  saved 5.145 kWh. The action-change penalty was larger than the scorer's
+  modeled benefit for relaxing cooling after a hot-condition clamp, so the
+  ranked policy tended to remain at 23 C. This is a diagnostic of the completed
+  run, not a simulated counterfactual or a claim that one coefficient change
+  will produce savings.
 - The verified run recorded safely rejected coordinator requests and
   post-completion shutdown-race audit noise. No stale or post-completion action
   reached EnergyPlus, and the shutdown path was subsequently hardened, but

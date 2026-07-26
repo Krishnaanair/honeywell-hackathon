@@ -588,3 +588,83 @@ period and is not presented as an energy benefit.
 - Replace the neutral team label with registered team-member and portal details
   if the submission form requires them.
 - Publish or attach the final release artifacts through the hackathon portal.
+
+## 2026-07-26 - Final release and adversarial audit
+
+### Completed
+
+- Made source-archive provenance fail closed when tracked source or index
+  changes are uncommitted. Archive text is normalized to LF, binary payloads
+  retain exact bytes, and the manifest records the verified source commit.
+- Added cross-platform archive regressions and verified them under Linux-style
+  Git line-ending behavior.
+- Made IDF provenance hashing independent of CRLF/LF conversion and forced
+  generated JSON manifests to use LF. Real model preparation produced no IDF,
+  action-schedule, actuator-map, or simulation-semantic changes.
+- Separated the historical executed-run preparation-manifest byte fingerprint
+  from the canonical packaged-manifest checksum.
+- Corrected the presentation's comparison checksum to the canonical Git-blob
+  value. Exactly one internal PPTX member changed; all six rendered slides were
+  pixel-identical to their accepted versions.
+- Removed documentation claims that depended on ignored temporary presentation
+  authoring files and retained a tool-neutral verified-results update contract.
+- Regenerated the source ZIP and all available PDFs from a clean pushed commit.
+- Audited all 145 source-ZIP members against the corresponding Git archive
+  bytes, repeated the build deterministically, and verified CRC, ordering,
+  timestamps, modes, checksums, manifest sizes, and source commit.
+- Scanned the package for secrets, real host paths, raw run directories,
+  installers, weather payloads, model weights, caches, interim decks, restricted
+  metadata, and unsupported or fabricated claims. No release blocker remained.
+- Confirmed the final dashboard health endpoint and the latest GitHub Actions
+  workflow.
+
+### Commands and results
+
+```text
+.venv\Scripts\python.exe -m pytest -q -m "not real_energyplus and not real_ollama and not real_closed_loop"
+.venv\Scripts\ruff.exe check .
+.venv\Scripts\ruff.exe format --check .
+.venv\Scripts\mypy.exe src
+.venv\Scripts\python.exe -m ecoloop doctor
+.venv\Scripts\python.exe -m ecoloop package-submission
+git diff --check
+git push origin main
+```
+
+| Check | Result |
+| --- | --- |
+| Full non-real suite with Linux-style Git behavior | PASS - 223 tests; 6 real tests deselected |
+| Ruff lint | PASS |
+| Ruff format | PASS - 107 files |
+| Strict mypy | PASS - 51 source files |
+| Doctor | READY - EnergyPlus 26.1.0, pyenergyplus, Ollama, qwen3:8b, model, weather, and writable directories |
+| Dashboard health | PASS - HTTP 200 |
+| GitHub Actions | PASS |
+| Source ZIP membership | PASS - 145 expected; zero missing or unexpected |
+| Deterministic source rebuild | PASS - byte-identical |
+| Manifest and checksums | PASS |
+| Package security and provenance scan | PASS - zero blockers |
+| Presentation acceptance | PASS - 6 slides, 6 source notes, canonical comparison checksum |
+| Generated PDF acceptance | PASS - 21 pages across 4 documents |
+
+### Adversarial outcome review
+
+The verified 118.604 kWh facility increase is exactly the HVAC-electricity
+increase; non-HVAC electricity is 665.175 kWh in both runs. The completed
+controller spent 49.75 hours at 19/23 C, and all 19/23 C intervals contributed
+123.749 kWh above their matched baseline intervals. All other setpoint
+combinations together saved 5.145 kWh.
+
+The deterministic safety layer correctly tightened cooling during 18
+hot-condition events. Afterward, the candidate scorer's 1.5-point-per-degree
+action-change penalty exceeded its modeled energy, tariff, and carbon benefit
+for relaxing cooling, so the controller commonly remained at 23 C. The local
+model selected the scorer's first-ranked candidate in 157 of 159 non-fallback
+decisions, showing that the outcome was driven mainly by the transparent scoring
+policy rather than inference randomness.
+
+A preregistered next experiment would change only that stability coefficient,
+retain every safety, occupancy, comfort, baseline, model, weather, and
+evaluation constraint, and require both positive official-output savings and
+baseline-or-better comfort before publication. It has not been executed and is
+not represented in any result, dashboard metric, report, or slide.
