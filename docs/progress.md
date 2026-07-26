@@ -345,3 +345,246 @@ severe errors, and fatal errors.
 - Regenerate and inspect the final PDFs, source ZIP, checksums, and manifest.
 - Run the final full quality, security, provenance, and archive-content audits.
 - Record the three-minute video and add registered team/portal identifiers.
+
+## 2026-07-26 - Cached-action generation and invalid-attempt accounting
+
+### Completed
+
+- Changed cached-action application to use the authoritative
+  `next_action_generation` returned by the constraint tool, with state-derived
+  generation retained only as a compatibility fallback.
+- Added a regression that starts after generation 7, omits generation history
+  from the state payload, and proves cache reuse applies generation 8 without
+  invoking the local model.
+- Updated final audit metrics to count invalid apply attempts rejected at the
+  MCP input-schema boundary as well as validator-rejected proposals.
+- Deduplicated a validator rejection when the same attempt is also represented
+  by an `invalid_action` decision outcome.
+- Left the active representative-week process and run database untouched.
+
+### Commands and results
+
+```text
+.venv\Scripts\python.exe -m pytest tests/integration/test_agent_loop.py::test_cached_action_uses_authoritative_advanced_generation tests/integration/test_evaluation.py::test_invalid_action_metric_includes_pre_schema_rejections_once -q
+.venv\Scripts\python.exe -m pytest tests/integration/test_agent_loop.py tests/integration/test_evaluation.py -q
+.venv\Scripts\python.exe -m ruff check src/ecoloop/agent/loop.py src/ecoloop/evaluation.py tests/integration/test_agent_loop.py tests/integration/test_evaluation.py
+.venv\Scripts\python.exe -m ruff format --check src/ecoloop/agent/loop.py src/ecoloop/evaluation.py tests/integration/test_agent_loop.py tests/integration/test_evaluation.py
+.venv\Scripts\python.exe -m mypy src/ecoloop/agent/loop.py src/ecoloop/evaluation.py
+git diff --check
+```
+
+| Check | Result |
+| --- | --- |
+| New focused regressions | PASS - 2 tests |
+| Full changed integration files | PASS - 23 tests |
+| Ruff lint | PASS |
+| Ruff format | PASS - 4 files already formatted |
+| Mypy | PASS - 2 changed source files |
+| Diff whitespace check | PASS; only existing line-ending notices |
+
+## 2026-07-26 - Source-package selection hardening
+
+### Completed
+
+- Replaced broad repository filesystem traversal with Git-index selection using
+  fixed, non-shell commands when packaging from a checkout.
+- Added an exact allowlist for the final presentation and ten small result
+  exports under `results/`.
+- Added a restricted fallback for unpacked source trees outside a Git checkout;
+  checkout discovery or index failures now stop packaging.
+- Added shared path and content validation for traversal, Git/filesystem
+  symlinks, credentials, user-home paths, raw EnergyPlus outputs, weather
+  assets, model weights, installers, caches, archives, unsupported
+  presentations, and files larger than 20 MiB.
+- Normalized source-ZIP order, timestamps, compression, and permissions.
+- Added deterministic Windows/Linux-compatible tests for Git selection,
+  fallback selection, generated-artifact inclusion, sensitive content,
+  presentation metadata, symlinks, oversized files, and Git failure handling.
+
+### Commands and results
+
+```text
+.venv\Scripts\python.exe -m pytest -q tests\integration\test_reporting.py
+.venv\Scripts\python.exe -m pytest -q tests\integration\test_reporting.py tests\integration\test_cli.py
+.venv\Scripts\ruff.exe check src\ecoloop\reporting.py tests\integration\test_reporting.py
+.venv\Scripts\ruff.exe format --check src\ecoloop\reporting.py tests\integration\test_reporting.py
+.venv\Scripts\mypy.exe src\ecoloop\reporting.py
+.venv\Scripts\ruff.exe check .
+.venv\Scripts\ruff.exe format --check .
+.venv\Scripts\mypy.exe src
+```
+
+| Check | Result |
+| --- | --- |
+| Reporting/package tests | PASS - 14 tests |
+| Reporting + CLI tests | PASS - 17 tests |
+| Scoped Ruff lint and format | PASS |
+| Scoped strict mypy | PASS |
+| Repository-wide Ruff format at this checkpoint | PASS - 105 files |
+
+This checkpoint was superseded by the final evaluation, visual QA, and release
+audit recorded below.
+
+## 2026-07-26 - Verified representative-week evaluation
+
+### Completed
+
+- Completed the same-model, same-weather, seven-day baseline and controlled
+  EnergyPlus 26.1.0 runs at a 15-minute zone timestep.
+- Parsed official EnergyPlus output totals and independently cross-checked the
+  callback telemetry accumulator. The controlled-run difference was
+  `2.27e-13 kWh`, within the configured 2% tolerance.
+- Exported the action schedule, actuator map, API-point catalogue, decisions,
+  telemetry, metrics, and comparison artifacts from the completed run.
+- Generated and executed a schedule-driven replay without local-model
+  inference. It reproduced all 170 control actions and finished 0.290% above
+  the live controlled-run electricity total; replay is therefore documented as
+  sequence reproducibility rather than bit-identical simulation.
+- Published the measured tradeoff without a positive savings claim: comfort
+  improved materially, while electricity, HVAC energy, peak demand, cost, and
+  operational carbon increased.
+
+### Representative-week evidence
+
+| Metric | Baseline | Controlled | Change |
+| --- | ---: | ---: | ---: |
+| Run ID | `baseline-20260726T105124Z-4adce000` | `agent-20260726T130255Z-65de6a32` | - |
+| Facility electricity | 1126.960 kWh | 1245.564 kWh | 10.524% higher |
+| HVAC electricity | 461.785 kWh | 580.389 kWh | 25.684% higher |
+| Peak electrical demand | 23.006 kW | 24.229 kW | 5.315% higher |
+| Occupied comfort compliance | 67.769% | 90.308% | +22.538 percentage points |
+| Occupied violation degree-hours | 80.627 | 22.360 | 72.267% lower |
+| PMV compliance | 94.615% | 97.462% | +2.846 percentage points |
+| Mean PPD | 7.659% | 6.697% | 0.962 percentage points lower |
+| Configured cost | 135.235 | 149.468 | 14.232 higher |
+| Operational carbon | 788.872 kg | 871.895 kg | 83.023 kg higher |
+
+The controlled week recorded 170 decisions, 788 MCP calls, zero timeouts, 11
+fallbacks, 13 invalid attempts, 24 safety clamps, 12.367-second average decision
+latency, and 14.672-second p95 latency. EnergyPlus recorded zero warnings, zero
+severe errors, and zero fatal errors.
+
+Six deduplicated coordinator diagnostic records representing eight occurrences
+remain in the week database. Two were stale or cached in-run attempts and four
+were post-completion attempt shapes from the then-running coordinator. None
+reached the EnergyPlus actuators. The shutdown race that admitted those audit
+records was fixed and is covered by the later strict real acceptance below.
+
+The replay run is `replay-20260726T134158Z-8fc97abd`. It completed 672
+observations and applied the 170 recorded schedule actions with zero inference
+calls and zero EnergyPlus warnings, severe errors, or fatal errors.
+
+## 2026-07-26 - Dashboard and visual acceptance
+
+### Completed
+
+- Audited all six dashboard views at 1440 x 1000 and 390 x 844 viewport sizes.
+- Reflowed live KPIs into responsive groups and replaced dense side-by-side
+  plots with full-width charts so values, legends, and titles remain legible.
+- Made the verified controlled week the default comparison instead of the
+  replay run.
+- Separated the latest proposal from the latest physically applied action and
+  added an explicit application-status flag.
+- Separated EnergyPlus diagnostics from controller audit records and sourced
+  final reliability counts from the verified metrics.
+- Corrected mobile navigation, tab styling, labels, tags, and refresh controls.
+- Cycled every page at desktop and mobile sizes with no page errors, console
+  errors, clipped cards, document-width overflow, or unintended overlap.
+
+### Focused validation
+
+```text
+.venv\Scripts\python.exe -m pytest tests/integration/test_dashboard_queries.py tests/unit/test_dashboard.py -q
+.venv\Scripts\ruff.exe check src/ecoloop/dashboard
+.venv\Scripts\ruff.exe format --check src/ecoloop/dashboard
+.venv\Scripts\mypy.exe src/ecoloop/dashboard
+```
+
+| Check | Result |
+| --- | --- |
+| Dashboard query and presentation tests | PASS - 6 tests |
+| Ruff lint and format | PASS |
+| Strict mypy | PASS |
+| Desktop visual QA | PASS - 6 views |
+| Mobile visual QA | PASS - 6 views |
+
+## 2026-07-26 - Presentation and PDF acceptance
+
+### Completed
+
+- Completed `presentation/ecoloop-submission.pptx` from the supplied
+  `IDEA_Presentation_Format.pptx` theme and dimensions.
+- Populated the results slide exclusively from the verified representative
+  week, including the higher electricity result and improved comfort result.
+- Removed placeholder content and checked all slides for overlap, clipping,
+  comments, prompts, local paths, and unsupported claims.
+- Added sources to all six slides and neutral document metadata.
+- Rendered and visually inspected every slide with both the artifact renderer
+  and the installed presentation application.
+- Improved the Markdown-to-PDF renderer so bold, code spans, links, publication
+  boundaries, identifiers, and metric tables render cleanly.
+- Regenerated and inspected all 15 pages across the results, architecture, and
+  demo-script PDFs.
+
+### Validation
+
+| Check | Result |
+| --- | --- |
+| Presentation slides inspected | PASS - 6 of 6 |
+| Slide source notes | PASS - 6 of 6 |
+| Placeholder, overlap, and clipping audit | PASS |
+| Results report | PASS - 4 pages |
+| Architecture report | PASS - 6 pages |
+| Demo-script report | PASS - 5 pages |
+| Focused PDF-rendering regressions | PASS - 18 tests |
+
+## 2026-07-26 - Latest-code strict real closed-loop acceptance
+
+### Completed
+
+- Executed the strict one-day EnergyPlus + stdio MCP + Ollama acceptance twice
+  after the shutdown, local-transport, action-generation, and metric-accounting
+  fixes. Both independent executions passed.
+- Retained the second execution's database and full EnergyPlus output tree for
+  an additional read-only audit.
+- Proved a complete state -> constraints -> candidate generation -> validated
+  application sequence over the MCP protocol.
+- Proved physical effect: observation 129 changed the active schedules from
+  17/29 C to 19/26 C for 60 minutes; observation 130 reported 19/26 C and the
+  mean zone temperature changed from 26.69758 C to 26.05904 C.
+- Verified that no proposals, applications, decisions, tool calls, fallbacks,
+  errors, severe coordinator records, or orphan proposals were created after
+  the terminal run transition.
+
+### Commands and results
+
+```text
+$env:ENERGYPLUS_HOME='<ENERGYPLUS_INSTALL>'
+$env:OLLAMA_MODEL='qwen3:8b'
+.venv\Scripts\python.exe -m pytest tests/real/test_closed_loop_smoke.py::test_real_energyplus_mcp_ollama_closed_loop_smoke -vv -s --durations=1 -o tmp_path_retention_policy=all --basetemp '<RETAINED_TEMP_ROOT>'
+```
+
+| Check | Result |
+| --- | --- |
+| Strict real acceptance | PASS - 1 test in 554.79 seconds |
+| Baseline run | `baseline-20260726T140958Z-3f8243d4` |
+| Controlled run | `agent-20260726T141008Z-2b4ab89a` |
+| EnergyPlus telemetry | PASS - 96 observations and 480 zone rows |
+| MCP protocol | PASS - 100 successful calls; zero failed calls |
+| Decisions and applications | PASS - 25 decisions; 25 proposals; 25 applications |
+| Physical-response assertion | PASS - 0.63854 C next-step mean-zone change |
+| EnergyPlus diagnostics | PASS - zero warnings, severe errors, or fatal errors |
+| Terminal boundary | PASS - zero post-terminal control work |
+
+The acceptance baseline used 217.9123 kWh and the controlled run used
+238.6806 kWh, equivalent to -9.5306% savings. This short acceptance period
+proves integration and physical control effect; it is not the primary evaluation
+period and is not presented as an energy benefit.
+
+### Remaining manual work
+
+- Record the three-minute video using `docs/demo-script.md` and the completed
+  real-run replay.
+- Replace the neutral team label with registered team-member and portal details
+  if the submission form requires them.
+- Publish or attach the final release artifacts through the hackathon portal.
