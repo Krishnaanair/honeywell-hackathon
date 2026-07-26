@@ -602,6 +602,18 @@ class SQLiteStore:
         self._validate_action_result_pair(action, validation)
         with self._connection() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            run_row = connection.execute(
+                "SELECT status FROM runs WHERE run_id = ?",
+                (action.run_id,),
+            ).fetchone()
+            if run_row is None:
+                connection.rollback()
+                raise RunStateError(f"unknown run_id: {action.run_id}")
+            if str(run_row["status"]) != RunStatus.RUNNING.value:
+                connection.rollback()
+                raise RunStateError(
+                    "control proposals can only be recorded for a running simulation"
+                )
             inserted = self._insert_proposed(connection, action, validation)
             connection.commit()
         return inserted

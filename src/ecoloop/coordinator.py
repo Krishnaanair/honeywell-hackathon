@@ -30,6 +30,7 @@ from ecoloop.energyplus.runtime import (
     SimulationResult,
     run_simulation,
 )
+from ecoloop.exceptions import RunStateError
 from ecoloop.mcp.sqlite_service import SQLiteMCPService
 from ecoloop.schemas import (
     ActuatorCapabilities,
@@ -188,6 +189,7 @@ async def coordinate_simulation(
                 state_token_budget=runtime_settings.state_token_budget,
             ),
             decision_sink=SQLiteDecisionSink(store),
+            run_is_active=lambda run_id: _run_is_active(store, run_id),
         )
         return await _run_loop(
             effective_request,
@@ -546,6 +548,7 @@ async def _run_loop(
     consecutive_failures = 0
     consecutive_failure_peak = 0
     control_disabled = False
+    terminal_seen = False
 
     try:
         while True:
@@ -563,11 +566,14 @@ async def _run_loop(
             fresh = [
                 item for item in observations if item.observation_id > last_seen_observation_id
             ]
-            simulation_done = simulation_task.done()
+            simulation_done = simulation_task.done() or await _run_is_terminal(
+                store,
+                request.run_id,
+            )
             for observation in fresh:
                 observations_seen += 1
                 last_seen_observation_id = observation.observation_id
-                if simulation_done:
+                if simulation_done or terminal_seen:
                     previous_observation = observation
                     continue
                 constraints = await _constraints(service, request.run_id)
@@ -596,7 +602,7 @@ async def _run_loop(
                         0.01,
                         deadline - asyncio.get_running_loop().time(),
                     )
-                    status, fallback, result, terminal_observation_id = await asyncio.wait_for(
+                    decision = await _await_decision_or_simulation(
                         _make_decision(
                             request.mode,
                             request.run_id,
@@ -604,8 +610,14 @@ async def _run_loop(
                             service=service,
                             agent_host=agent_host,
                         ),
-                        timeout=min(decision_timeout, remaining_seconds),
+                        simulation_task=simulation_task,
+                        timeout_seconds=min(decision_timeout, remaining_seconds),
                     )
+                    if decision is None or await _run_is_terminal(store, request.run_id):
+                        terminal_seen = True
+                        previous_observation = observation
+                        continue
+                    status, fallback, result, terminal_observation_id = decision
                     decided_observations.add(terminal_observation_id)
                     if terminal_observation_id != observation.observation_id:
                         resolved_terminal = await asyncio.to_thread(
@@ -618,21 +630,41 @@ async def _run_loop(
                     error = None
                     consecutive_failures = 0
                 except TimeoutError:
-                    status, fallback, result, error = await _recover_with_fallback(
+                    if simulation_task.done() or await _run_is_terminal(
+                        store,
+                        request.run_id,
+                    ):
+                        terminal_seen = True
+                        previous_observation = observation
+                        continue
+                    recovered = await _recover_with_fallback(
                         request.run_id,
                         observation,
                         service=service,
                         store=store,
                         error="coordinator decision timeout",
                     )
+                    if recovered is None:
+                        terminal_seen = True
+                        previous_observation = observation
+                        continue
+                    status, fallback, result, error = recovered
                     consecutive_failures = consecutive_failures + 1 if status == "failed" else 0
                 except (
                     AgentProtocolError,
                     OSError,
+                    RunStateError,
                     RuntimeError,
                     TypeError,
                     ValueError,
                 ) as exc:
+                    if simulation_task.done() or await _run_is_terminal(
+                        store,
+                        request.run_id,
+                    ):
+                        terminal_seen = True
+                        previous_observation = observation
+                        continue
                     message = _bounded_error(exc)
                     await asyncio.to_thread(
                         store.record_error,
@@ -641,13 +673,18 @@ async def _run_loop(
                         "coordinator",
                         message,
                     )
-                    status, fallback, result, error = await _recover_with_fallback(
+                    recovered = await _recover_with_fallback(
                         request.run_id,
                         observation,
                         service=service,
                         store=store,
                         error=message,
                     )
+                    if recovered is None:
+                        terminal_seen = True
+                        previous_observation = observation
+                        continue
+                    status, fallback, result, error = recovered
                     consecutive_failures = consecutive_failures + 1 if status == "failed" else 0
                 consecutive_failure_peak = max(
                     consecutive_failure_peak,
@@ -680,7 +717,7 @@ async def _run_loop(
                     )
                     break
 
-            if simulation_task.done():
+            if simulation_task.done() or terminal_seen:
                 break
             await asyncio.sleep(config.observation_poll_seconds)
 
@@ -738,6 +775,55 @@ async def _make_decision(
     return "fallback", True, result, observation.observation_id
 
 
+async def _await_decision_or_simulation(
+    decision: Coroutine[Any, Any, tuple[str, bool, dict[str, Any], int]],
+    *,
+    simulation_task: asyncio.Task[SimulationResult],
+    timeout_seconds: float,
+) -> tuple[str, bool, dict[str, Any], int] | None:
+    """Cancel and drain a decision when its simulation reaches terminal first."""
+
+    decision_task = asyncio.create_task(decision)
+    try:
+        completed, _ = await asyncio.wait(
+            {decision_task, simulation_task},
+            timeout=timeout_seconds,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if simulation_task in completed:
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+            return None
+        if decision_task not in completed:
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+            raise TimeoutError
+        return decision_task.result()
+    finally:
+        if not decision_task.done():
+            decision_task.cancel()
+            await asyncio.gather(decision_task, return_exceptions=True)
+
+
+async def _run_is_terminal(store: SQLiteStore, run_id: str) -> bool:
+    """Return whether durable run state has crossed its terminal boundary."""
+
+    run = await asyncio.to_thread(store.get_run, run_id)
+    return run is not None and run.status in {
+        RunStatus.COMPLETED,
+        RunStatus.FAILED,
+        RunStatus.BLOCKED,
+        RunStatus.CANCELLED,
+    }
+
+
+async def _run_is_active(store: SQLiteStore, run_id: str) -> bool:
+    """Return whether control-affecting calls are still allowed for a run."""
+
+    run = await asyncio.to_thread(store.get_run, run_id)
+    return run is not None and run.status is RunStatus.RUNNING
+
+
 async def _recover_with_fallback(
     run_id: str,
     observation: BuildingObservation,
@@ -745,7 +831,9 @@ async def _recover_with_fallback(
     service: SQLiteMCPService,
     store: SQLiteStore,
     error: str,
-) -> tuple[str, bool, dict[str, Any], str | None]:
+) -> tuple[str, bool, dict[str, Any], str | None] | None:
+    if await _run_is_terminal(store, run_id):
+        return None
     latest = await asyncio.to_thread(store.get_last_applied_action, run_id)
     if latest is not None and latest[0].observation_id == observation.observation_id:
         return (
@@ -758,12 +846,16 @@ async def _recover_with_fallback(
             },
             error,
         )
+    if await _run_is_terminal(store, run_id):
+        return None
     try:
         result = await service.request_safe_fallback(
             run_id,
             observation.observation_id,
         )
-    except (OSError, RuntimeError, TypeError, ValueError) as fallback_exc:
+    except (OSError, RunStateError, RuntimeError, TypeError, ValueError) as fallback_exc:
+        if await _run_is_terminal(store, run_id):
+            return None
         fallback_error = f"{error}; fallback failed: {_bounded_error(fallback_exc)}"
         await asyncio.to_thread(
             store.record_error,

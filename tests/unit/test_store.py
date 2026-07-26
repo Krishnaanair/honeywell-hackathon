@@ -242,6 +242,21 @@ def test_action_id_cannot_be_reused_with_changed_audit_metadata(
         store.record_proposed_action(proposal.model_copy(update={"model": "different-model"}))
 
 
+def test_store_rejects_new_proposal_after_run_is_terminal(
+    store: SQLiteStore,
+) -> None:
+    _create_running_run(store)
+    persisted = store.record_observation(observation_input())
+    proposal = action(observation_id=persisted.observation_id)
+    store.set_run_status("run-agent-1", RunStatus.COMPLETED)
+
+    with pytest.raises(RunStateError, match="running simulation"):
+        store.record_proposed_action(proposal)
+
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM proposed_actions").fetchone()[0] == 0
+
+
 def test_store_rejects_wrong_run_stale_and_non_monotonic_actions(
     store: SQLiteStore,
 ) -> None:

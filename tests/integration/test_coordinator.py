@@ -172,6 +172,59 @@ class ObservationAdvanceModel(ScriptedModel):
         return response.model_copy(update={"tool_calls": calls})
 
 
+class TerminalBoundaryModel(ScriptedModel):
+    """Block inference until the coordinator cancels it at simulation terminal."""
+
+    def __init__(
+        self,
+        decision_started: threading.Event,
+        decision_cancelled: threading.Event,
+    ) -> None:
+        super().__init__([valid_tool_sequence()])
+        self._decision_started = decision_started
+        self._decision_cancelled = decision_cancelled
+
+    async def complete(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ModelResponse:
+        del messages, tools
+        self.call_count += 1
+        self._decision_started.set()
+        try:
+            await asyncio.Future()
+        except asyncio.CancelledError:
+            self._decision_cancelled.set()
+            raise
+
+
+class TerminalCompletionModel(ScriptedModel):
+    """Return a valid decision only after durable run status is terminal."""
+
+    def __init__(
+        self,
+        decision_started: threading.Event,
+        run_marked_terminal: threading.Event,
+    ) -> None:
+        super().__init__([valid_tool_sequence()])
+        self._decision_started = decision_started
+        self._run_marked_terminal = run_marked_terminal
+
+    async def complete(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ModelResponse:
+        del messages, tools
+        self.call_count += 1
+        self._decision_started.set()
+        terminal = await asyncio.to_thread(self._run_marked_terminal.wait, 2.0)
+        if not terminal:
+            raise RuntimeError("run did not reach terminal status during the decision")
+        return valid_tool_sequence()
+
+
 def _runner_advancing_observation_during_decision(
     decision_started: threading.Event,
     newer_observation_ready: threading.Event,
@@ -233,6 +286,103 @@ def _runner_advancing_observation_during_decision(
             fatal_count=0,
             observation_count=2,
             applied_action_count=applied_count,
+        )
+
+    return run
+
+
+def _runner_completing_with_queued_observation(
+    decision_started: threading.Event,
+) -> Callable[[SimulationRequest], SimulationResult]:
+    """Finish while observation one is deciding and observation two is queued."""
+
+    def run(request: SimulationRequest) -> SimulationResult:
+        store = SQLiteStore(request.database_path)
+        store.create_run(
+            request.run_id,
+            RunType.AGENT,
+            is_fake=True,
+            energyplus_version="explicit-test-fake",
+        )
+        store.set_run_status(request.run_id, RunStatus.RUNNING)
+        wall_now = datetime.now(UTC)
+        store.record_observation(
+            observation_input(
+                run_id=request.run_id,
+                timestamp=wall_now,
+                simulation_timestamp=wall_now,
+            )
+        )
+        if not decision_started.wait(2.0):
+            raise RuntimeError("coordinator did not start the terminal-boundary decision")
+        store.record_observation(
+            observation_input(
+                run_id=request.run_id,
+                timestamp=datetime.now(UTC),
+                simulation_timestamp=wall_now + timedelta(minutes=15),
+                timestep_key="terminal-queued-step",
+                occupied=False,
+                occupancy_count=0.0,
+            )
+        )
+        store.set_run_status(request.run_id, RunStatus.COMPLETED)
+        return SimulationResult(
+            run_id=request.run_id,
+            status="completed",
+            exit_code=0,
+            output_directory=request.output_directory,
+            elapsed_seconds=0.1,
+            progress_percent=100,
+            warning_count=0,
+            severe_count=0,
+            fatal_count=0,
+            observation_count=2,
+            applied_action_count=0,
+        )
+
+    return run
+
+
+def _runner_marks_terminal_before_return(
+    decision_started: threading.Event,
+    run_marked_terminal: threading.Event,
+) -> Callable[[SimulationRequest], SimulationResult]:
+    """Mark the run complete while allowing a late model response to finish."""
+
+    def run(request: SimulationRequest) -> SimulationResult:
+        store = SQLiteStore(request.database_path)
+        store.create_run(
+            request.run_id,
+            RunType.AGENT,
+            is_fake=True,
+            energyplus_version="explicit-test-fake",
+        )
+        store.set_run_status(request.run_id, RunStatus.RUNNING)
+        wall_now = datetime.now(UTC)
+        store.record_observation(
+            observation_input(
+                run_id=request.run_id,
+                timestamp=wall_now,
+                simulation_timestamp=wall_now,
+            )
+        )
+        if not decision_started.wait(2.0):
+            raise RuntimeError("coordinator did not start the late terminal decision")
+        store.set_run_status(request.run_id, RunStatus.COMPLETED)
+        run_marked_terminal.set()
+        time.sleep(0.2)
+        return SimulationResult(
+            run_id=request.run_id,
+            status="completed",
+            exit_code=0,
+            output_directory=request.output_directory,
+            elapsed_seconds=0.2,
+            progress_percent=100,
+            warning_count=0,
+            severe_count=0,
+            fatal_count=0,
+            observation_count=1,
+            applied_action_count=0,
         )
 
     return run
@@ -333,6 +483,86 @@ async def test_coordinator_marks_newer_terminal_observation_as_decided(
         connection.close()
     assert durable_observations == [2]
     assert store.get_recent_errors(request.run_id) == []
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_terminal_simulation_cancels_inflight_and_queued_decisions(
+    tmp_path: Path,
+) -> None:
+    decision_started = threading.Event()
+    decision_cancelled = threading.Event()
+    model = TerminalBoundaryModel(decision_started, decision_cancelled)
+    request = _request(tmp_path, SimulationMode.AGENT)
+
+    result = await coordinate_simulation(
+        request,
+        settings=_settings(tmp_path),
+        config=CoordinatorConfig(
+            observation_poll_seconds=0.01,
+            overall_timeout_seconds=6.0,
+            decision_timeout_seconds=3.0,
+            terminal_settle_seconds=0.0,
+        ),
+        runner=_runner_completing_with_queued_observation(decision_started),
+        model_backend=model,
+    )
+
+    assert result.completed
+    assert result.decisions == ()
+    assert result.last_observation_id == 2
+    assert model.call_count == 1
+    assert decision_cancelled.is_set()
+    store = SQLiteStore(request.database_path)
+    assert store.get_applied_actions(request.run_id) == []
+    assert store.get_recent_errors(request.run_id) == []
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM proposed_actions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM agent_decisions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM tool_calls").fetchone()[0] == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_late_terminal_decision_cannot_apply_or_invoke_fallback(
+    tmp_path: Path,
+) -> None:
+    decision_started = threading.Event()
+    run_marked_terminal = threading.Event()
+    model = TerminalCompletionModel(decision_started, run_marked_terminal)
+    request = _request(tmp_path, SimulationMode.AGENT)
+
+    result = await coordinate_simulation(
+        request,
+        settings=_settings(tmp_path),
+        config=CoordinatorConfig(
+            observation_poll_seconds=0.01,
+            overall_timeout_seconds=6.0,
+            decision_timeout_seconds=3.0,
+            terminal_settle_seconds=0.0,
+        ),
+        runner=_runner_marks_terminal_before_return(
+            decision_started,
+            run_marked_terminal,
+        ),
+        model_backend=model,
+    )
+
+    assert result.completed
+    assert result.decisions == ()
+    assert model.call_count == 1
+    store = SQLiteStore(request.database_path)
+    assert store.get_applied_actions(request.run_id) == []
+    assert store.get_recent_errors(request.run_id) == []
+    with sqlite3.connect(store.path) as connection:
+        tool_names = [
+            str(row[0])
+            for row in connection.execute("SELECT tool_name FROM tool_calls ORDER BY timestamp")
+        ]
+        assert "apply_control_action" not in tool_names
+        assert "request_safe_fallback" not in tool_names
+        assert connection.execute("SELECT COUNT(*) FROM proposed_actions").fetchone()[0] == 0
+        assert connection.execute("SELECT COUNT(*) FROM agent_decisions").fetchone()[0] == 0
 
 
 @pytest.mark.integration

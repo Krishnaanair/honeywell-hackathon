@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -10,12 +11,14 @@ import pytest
 from mcp.server.fastmcp.exceptions import ToolError
 
 from ecoloop.config import Settings
+from ecoloop.control.safety import SafetyContext, SafetyValidator
 from ecoloop.db.store import SQLiteStore
-from ecoloop.mcp.models import OPERATIONAL_REASON_CODES
+from ecoloop.exceptions import RunStateError
+from ecoloop.mcp.models import OPERATIONAL_REASON_CODES, ControlActionInput
 from ecoloop.mcp.path_policy import PathPolicy
 from ecoloop.mcp.server import create_mcp_server
 from ecoloop.mcp.sqlite_service import SQLiteMCPService
-from ecoloop.schemas import RunStatus, RunType
+from ecoloop.schemas import ControlAction, RunStatus, RunType, ValidationResult
 from tests.support.fake_mcp import FakeMCPService
 from tests.unit._factories import observation_input
 
@@ -36,6 +39,23 @@ EXPECTED_TOOLS = {
     "parse_energyplus_error_file",
     "generate_replay_model",
 }
+
+
+class TerminalDuringValidation(SafetyValidator):
+    """Cross the terminal boundary after validation but before persistence."""
+
+    def __init__(self, store: SQLiteStore) -> None:
+        super().__init__()
+        self._store = store
+
+    def validate(
+        self,
+        proposal: ControlAction,
+        context: SafetyContext,
+    ) -> ValidationResult:
+        result = super().validate(proposal, context)
+        self._store.set_run_status(proposal.run_id, RunStatus.COMPLETED)
+        return result
 
 
 @pytest.fixture
@@ -349,3 +369,89 @@ async def test_sqlite_service_fallback_advances_after_rejected_proposal(
     persisted = store.get_last_applied_action("run-agent-1")
     assert persisted is not None
     assert persisted[0].action_generation == 2
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_rejects_control_tools_without_proposals(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "bus.db")
+    store.create_run("run-agent-1", RunType.AGENT, energyplus_version="26.1.0")
+    store.set_run_status("run-agent-1", RunStatus.RUNNING)
+    now = datetime.now(UTC)
+    observation = store.record_observation(
+        observation_input(timestamp=now, simulation_timestamp=now)
+    )
+    store.set_run_status("run-agent-1", RunStatus.COMPLETED)
+    service = SQLiteMCPService(
+        store=store,
+        settings=Settings(
+            ECOLOOP_DATABASE_PATH=tmp_path / "bus.db",
+            ECOLOOP_RUNS_DIR=tmp_path / "runs",
+        ),
+    )
+    action = ControlActionInput(
+        heating_setpoint_c=20.0,
+        cooling_setpoint_c=25.0,
+        hold_minutes=60,
+        action_generation=1,
+        reason_code="ENERGY_OPTIMIZATION",
+        explanation="This terminal-boundary action must not persist.",
+    )
+
+    with pytest.raises(RunStateError, match="require a running simulation"):
+        await service.apply_control_action(
+            "run-agent-1",
+            observation.observation_id,
+            action,
+        )
+    with pytest.raises(RunStateError, match="require a running simulation"):
+        await service.request_safe_fallback(
+            "run-agent-1",
+            observation.observation_id,
+        )
+
+    assert store.get_applied_actions("run-agent-1") == []
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM proposed_actions").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_terminal_transition_during_validation_leaves_no_orphan_proposal(
+    tmp_path: Path,
+) -> None:
+    store = SQLiteStore(tmp_path / "bus.db")
+    store.create_run("run-agent-1", RunType.AGENT, energyplus_version="26.1.0")
+    store.set_run_status("run-agent-1", RunStatus.RUNNING)
+    now = datetime.now(UTC)
+    observation = store.record_observation(
+        observation_input(timestamp=now, simulation_timestamp=now)
+    )
+    service = SQLiteMCPService(
+        store=store,
+        settings=Settings(
+            ECOLOOP_DATABASE_PATH=tmp_path / "bus.db",
+            ECOLOOP_RUNS_DIR=tmp_path / "runs",
+        ),
+        validator=TerminalDuringValidation(store),
+    )
+    action = ControlActionInput(
+        heating_setpoint_c=20.0,
+        cooling_setpoint_c=25.0,
+        hold_minutes=60,
+        action_generation=1,
+        reason_code="ENERGY_OPTIMIZATION",
+        explanation="Validation completes exactly as the run reaches terminal.",
+    )
+
+    result = await service.apply_control_action(
+        "run-agent-1",
+        observation.observation_id,
+        action,
+    )
+
+    assert result["success"] is False
+    assert result["application"]["rejection_code"] == "run_not_active"
+    assert store.get_applied_actions("run-agent-1") == []
+    with sqlite3.connect(store.path) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM proposed_actions").fetchone()[0] == 0

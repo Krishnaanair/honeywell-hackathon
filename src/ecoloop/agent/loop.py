@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -74,6 +75,10 @@ class AgentProtocolError(RuntimeError):
     """Raised when a terminal safe MCP action cannot be completed."""
 
 
+class AgentRunTerminated(AgentProtocolError):
+    """Raised when a terminal run boundary cancels further control calls."""
+
+
 @dataclass(frozen=True, slots=True)
 class AgentHostConfig:
     """Reliability and prompt limits for one local controller host."""
@@ -131,6 +136,7 @@ class AgentHost:
         circuit_breaker: FailureCircuitBreaker | None = None,
         action_cache: ActionCache | None = None,
         decision_sink: DecisionSink | None = None,
+        run_is_active: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._mcp = mcp_client
         self._model = model
@@ -140,6 +146,7 @@ class AgentHost:
         )
         self._cache = action_cache or ActionCache()
         self._decision_sink = decision_sink or NullDecisionSink()
+        self._run_is_active = run_is_active
 
     @property
     def circuit_breaker(self) -> FailureCircuitBreaker:
@@ -155,6 +162,7 @@ class AgentHost:
     ) -> AgentDecision:
         """Complete one validated apply/fallback decision through MCP."""
 
+        await self._require_run_active(run_id)
         started_clock = time.perf_counter()
         trace: list[HostToolTrace] = []
         tools = await self._mcp.discover_tools()
@@ -374,9 +382,12 @@ class AgentHost:
                     )
                     break
                 try:
+                    if request.name in _TERMINAL_TOOLS:
+                        await self._require_run_active(run_id)
                     result = await self._call_and_trace(request, trace)
                 except MCPClientError:
                     if request.name == "apply_control_action":
+                        await self._require_run_active(run_id)
                         self._breaker.record_failure(run_id)
                         return await self._fallback_decision(
                             run_id,
@@ -417,6 +428,7 @@ class AgentHost:
                         terminal = (request.name, result, request)
                         break
                     if request.name == "apply_control_action":
+                        await self._require_run_active(run_id)
                         self._breaker.record_failure(run_id)
                         return await self._fallback_decision(
                             run_id,
@@ -556,6 +568,7 @@ class AgentHost:
                 "action": action,
             },
         )
+        await self._require_run_active(run_id)
         try:
             applied = await self._call_and_trace(apply_request, trace)
         except MCPClientError:
@@ -594,6 +607,7 @@ class AgentHost:
         timeout_count: int,
         fallback_status: str,
     ) -> AgentDecision:
+        await self._require_run_active(run_id)
         if not sequence.state_seen:
             state_request = ToolRequest(
                 name="get_current_building_state",
@@ -622,6 +636,7 @@ class AgentHost:
                 "observation_id": _required_observation_id(sequence),
             },
         )
+        await self._require_run_active(run_id)
         try:
             result = await self._call_and_trace(fallback_request, trace)
         except MCPClientError as exc:
@@ -646,6 +661,14 @@ class AgentHost:
             state_summary=sequence.current_state,
         )
         return decision
+
+    async def _require_run_active(self, run_id: str) -> None:
+        if self._run_is_active is None:
+            return
+        if not await self._run_is_active(run_id):
+            raise AgentRunTerminated(
+                f"run {run_id} reached terminal state; control decision was cancelled"
+            )
 
     async def _call_and_trace(
         self,

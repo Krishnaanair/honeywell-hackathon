@@ -30,6 +30,7 @@ from ecoloop.energyplus.discovery import discover_energyplus
 from ecoloop.energyplus.handles import normalize_point_name, parse_available_api_data
 from ecoloop.energyplus.logs import parse_error_file, severity_counts
 from ecoloop.energyplus.model import ReplayAction, write_action_schedule
+from ecoloop.exceptions import RunStateError
 from ecoloop.mcp.models import (
     OPERATIONAL_REASON_CODES,
     AuditEvent,
@@ -210,6 +211,7 @@ class SQLiteMCPService:
         observation_id: int,
         action: ControlActionInput,
     ) -> dict[str, Any]:
+        await self._require_running_run(run_id)
         observation, constraints = await self._observation_and_constraints(run_id)
         now = datetime.now(UTC)
         proposal = _domain_control_action(
@@ -261,8 +263,8 @@ class SQLiteMCPService:
                 now=now,
             ),
         )
-        await asyncio.to_thread(self._store.record_proposed_action, proposal, validation)
         if not validation.accepted:
+            await asyncio.to_thread(self._store.record_proposed_action, proposal, validation)
             return {
                 "success": False,
                 "status": "rejected",
@@ -304,6 +306,7 @@ class SQLiteMCPService:
         run_id: str,
         observation_id: int,
     ) -> dict[str, Any]:
+        await self._require_running_run(run_id)
         observation, constraints = await self._observation_and_constraints(run_id)
         if observation_id != observation.observation_id:
             raise ValueError(
@@ -340,8 +343,8 @@ class SQLiteMCPService:
                 now=now,
             ),
         )
-        await asyncio.to_thread(self._store.record_proposed_action, proposal, validation)
         if not validation.accepted:
+            await asyncio.to_thread(self._store.record_proposed_action, proposal, validation)
             raise RuntimeError(
                 "deterministic fallback was rejected: "
                 + "; ".join(issue.message for issue in validation.issues)
@@ -645,6 +648,15 @@ class SQLiteMCPService:
             config=load_file_config().control,
         )
         return observation, constraints
+
+    async def _require_running_run(self, run_id: str) -> None:
+        run = await asyncio.to_thread(self._store.get_run, run_id)
+        if run is None:
+            raise RunStateError(f"unknown run_id: {run_id}")
+        if run.status is not RunStatus.RUNNING:
+            raise RunStateError(
+                f"control tools require a running simulation; run {run_id} is {run.status.value}"
+            )
 
     def _last_proposed_generation(self, run_id: str) -> int:
         connection = sqlite3.connect(self._store.path)
