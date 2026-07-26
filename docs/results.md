@@ -129,11 +129,17 @@ validator-accepted but never applied and therefore could not affect the physical
 simulation or official totals. The shutdown guard was subsequently hardened;
 these records are still disclosed, so the run is not described as error-free.
 
-Schedule replay `replay-20260726T134158Z-8fc97abd` completed without local-model
-inference, applied all 170 recorded actions, produced 672 observations, and
-reported 0 EnergyPlus warnings, severe errors, or fatal errors. Replay facility
-electricity was 1249.180 kWh, 0.290% above the live agent total; it demonstrates
-portable action-sequence reproduction rather than bit-for-bit identity.
+Schedule replay of this week was repaired and re-executed on 2026-07-26. The
+repaired replay `replay-20260726T171617Z-5ffa3497` rebuilds the schedule from
+the source run's verified physical actuator acknowledgements and immutable
+model snapshot, applied all 170 recorded actions, produced 672 observations,
+reported 0 EnergyPlus warnings, severe errors, or fatal errors, and reproduced
+the source agent run digit-for-digit: facility electricity 1245.564416842928
+kWh, HVAC 580.389416842928 kWh, peak 24.2293835189757 kW, occupied violation
+9.6923%, and PMV compliance 97.4615% are all identical to the source values.
+An earlier pre-repair replay (`replay-20260726T134158Z-8fc97abd`) differed by
+0.290% because it applied actions one timestep early; it is retained as the
+diagnostic that motivated the repair.
 <!-- END VERIFIED_EVALUATION_BLOCK -->
 
 The marked block above is the deterministic publication boundary. It is derived
