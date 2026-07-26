@@ -137,19 +137,22 @@ def zone_telemetry(database_path: Path, run_id: str, *, limit: int | None = None
 
 
 def recent_actions(database_path: Path, run_id: str, *, limit: int = 25) -> pd.DataFrame:
-    """Return proposed actions with their applied values and validation."""
+    """Return proposed actions, validation, and physical-application status."""
 
     _validate_limit(limit)
     frame = _read_frame(
         database_path,
         """
-        SELECT timestamp, observation_id, action_generation, action_id,
-               proposed_values_json, applied_values_json,
-               validation_result_json, clamp_details_json, expiry, model,
-               latency_ms, reason_code, explanation, fallback_status, cache_hit
-        FROM proposed_actions
-        WHERE run_id = ?
-        ORDER BY observation_id DESC, action_generation DESC
+        SELECT p.timestamp, p.observation_id, p.action_generation, p.action_id,
+               p.proposed_values_json, p.applied_values_json,
+               p.validation_result_json, p.clamp_details_json, p.expiry, p.model,
+               p.latency_ms, p.reason_code, p.explanation, p.fallback_status,
+               p.cache_hit,
+               CASE WHEN a.action_id IS NULL THEN 0 ELSE 1 END AS applied
+        FROM proposed_actions AS p
+        LEFT JOIN applied_actions AS a ON a.action_id = p.action_id
+        WHERE p.run_id = ?
+        ORDER BY p.observation_id DESC, p.action_generation DESC
         LIMIT ?
         """,
         (run_id, limit),

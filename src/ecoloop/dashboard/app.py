@@ -26,7 +26,7 @@ def main() -> None:
         page_title="EcoLoop Building Agents",
         page_icon="🌿",
         layout="wide",
-        initial_sidebar_state="expanded",
+        initial_sidebar_state="auto",
     )
     _apply_style()
     settings = get_settings()
@@ -230,7 +230,7 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
         if not zones.empty
         else zones
     )
-    actions = queries.recent_actions(database_path, str(run["run_id"]), limit=5)
+    actions = queries.recent_actions(database_path, str(run["run_id"]), limit=25)
     tools = queries.recent_tool_calls(database_path, str(run["run_id"]), limit=8)
     decisions = queries.recent_decisions(database_path, str(run["run_id"]), limit=5)
 
@@ -251,29 +251,42 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
     occupancy = latest_zones["occupant_count"].sum() if not latest_zones.empty else None
     temp = latest_zones["operative_temperature_c"].mean() if not latest_zones.empty else None
     latency = decisions.iloc[0].get("latency_ms") if not decisions.empty else None
+    applied_actions = (
+        actions[actions["applied"] == 1] if not actions.empty and "applied" in actions else actions
+    )
     fallback = (
-        str(actions.iloc[0].get("fallback_status") or "inactive")
-        if not actions.empty
+        str(applied_actions.iloc[0].get("fallback_status") or "inactive")
+        if not applied_actions.empty
         else "no action"
     )
     fallback_active = fallback.casefold() not in {"", "none", "inactive", "no action"}
 
-    columns = st.columns(5)
+    columns = st.columns(4)
     columns[0].metric("Simulation clock", simulation_clock)
     columns[1].metric("Progress", _format_value(run.get("progress_percent"), "%"))
     columns[2].metric("Operative temperature", _format_value(temp, " °C"))
     columns[3].metric("Facility demand", _format_value(demand, " kW"))
-    columns[4].metric("Occupancy", _format_value(occupancy, " people"))
 
-    status_cols = st.columns(5)
-    status_cols[0].metric("Heating setpoint", _format_value(heat_sp, " °C"))
-    status_cols[1].metric("Cooling setpoint", _format_value(cool_sp, " °C"))
-    status_cols[2].metric("Outdoor air", _format_value(outdoor, " °C"))
-    status_cols[3].metric("Cumulative electricity", _format_value(cumulative_energy, " kWh"))
-    status_cols[4].metric("Decision latency", _format_value(latency, " ms"))
+    status_cols = st.columns(4)
+    status_cols[0].metric("Occupancy", _format_value(occupancy, " people"))
+    status_cols[1].metric("Heating setpoint", _format_value(heat_sp, " °C"))
+    status_cols[2].metric("Cooling setpoint", _format_value(cool_sp, " °C"))
+    status_cols[3].metric("Outdoor air", _format_value(outdoor, " °C"))
 
-    if fallback_active:
+    audit_cols = st.columns(2)
+    audit_cols[0].metric(
+        "Cumulative electricity",
+        _format_value(cumulative_energy, " kWh"),
+    )
+    audit_cols[1].metric("Decision latency", _format_duration_ms(latency))
+
+    if fallback_active and str(run.get("status")).casefold() == "running":
         st.warning(f"Deterministic fallback active · {fallback.replace('_', ' ').title()}")
+    elif fallback_active:
+        st.info(
+            "The final physically applied action used deterministic fallback · "
+            f"{fallback.replace('_', ' ').title()}."
+        )
     elif str(run.get("status")).casefold() == "running":
         st.success("Control loop healthy · live telemetry and audited actions are arriving.")
     elif str(run.get("status")).casefold() == "failed":
@@ -331,9 +344,8 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
             title="Electrical demand",
             yaxis_title="Demand (kW)",
         )
-        plot_left, plot_right = st.columns([1.45, 1.0])
-        plot_left.plotly_chart(temperature_figure, width="stretch")
-        plot_right.plotly_chart(demand_figure, width="stretch")
+        st.plotly_chart(temperature_figure, width="stretch")
+        st.plotly_chart(demand_figure, width="stretch")
 
     if not latest_zones.empty:
         st.markdown("#### Current zone snapshot")
@@ -378,26 +390,38 @@ def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None
         if actions.empty:
             st.caption("No action record yet.")
         else:
-            action = actions.iloc[0]
+            proposed_action = actions.iloc[0]
             st.markdown(
                 _action_card(
                     title="Proposed by controller",
-                    values=action.get("proposed_values"),
+                    values=proposed_action.get("proposed_values"),
                     accent="proposed",
                 ),
                 unsafe_allow_html=True,
             )
-            st.markdown(
-                _action_card(
-                    title="Applied after safety validation",
-                    values=action.get("applied_values"),
-                    accent="applied",
-                ),
-                unsafe_allow_html=True,
-            )
-            reason = str(action.get("reason_code") or "unspecified").replace("_", " ").title()
-            explanation = action.get("explanation") or "No operational explanation recorded."
-            st.caption(f"{reason} · {explanation!s}")
+            if int(proposed_action.get("applied") or 0) == 0:
+                st.caption("Latest proposal was not physically applied.")
+            if applied_actions.empty:
+                st.caption("No action has been physically applied.")
+            else:
+                applied_action = applied_actions.iloc[0]
+                st.markdown(
+                    _action_card(
+                        title="Latest physically applied action",
+                        values=applied_action.get("applied_values"),
+                        accent="applied",
+                    ),
+                    unsafe_allow_html=True,
+                )
+                reason = (
+                    str(applied_action.get("reason_code") or "unspecified")
+                    .replace("_", " ")
+                    .title()
+                )
+                explanation = (
+                    applied_action.get("explanation") or "No operational explanation recorded."
+                )
+                st.caption(f"{reason} · {explanation!s}")
     with right:
         st.markdown("#### Recent MCP tool trace")
         if tools.empty:
@@ -444,7 +468,11 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
         st.info("A completed real baseline and controlled run are both required.")
         return
     left, right = st.columns(2)
-    controlled_id = left.selectbox("Controlled run", controlled["run_id"].tolist())
+    controlled_id = left.selectbox(
+        "Controlled run",
+        controlled["run_id"].tolist(),
+        index=_preferred_controlled_index(controlled),
+    )
     controlled_row = controlled[controlled["run_id"] == controlled_id].iloc[0]
     matching = baselines[
         (baselines["period_name"] == controlled_row["period_name"])
@@ -493,7 +521,7 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
     hvac_controlled = _metric_value(controlled_metrics, "hvac_electricity_kwh")
     peak_change = _percent_change(peak_baseline, peak_controlled)
     hvac_change = _percent_change(hvac_baseline, hvac_controlled)
-    cards = st.columns(6)
+    cards = st.columns(3)
     cards[0].metric("Baseline electricity", _format_value(baseline_kwh, " kWh"))
     cards[1].metric("Controlled electricity", _format_value(controlled_kwh, " kWh"))
     cards[2].metric(
@@ -502,19 +530,20 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
         delta="lower is better",
         delta_color="off",
     )
-    cards[3].metric(
+    secondary_cards = st.columns(3)
+    secondary_cards[0].metric(
         "Peak demand",
         _format_value(peak_controlled, " kW"),
         delta=_signed_percent(peak_change),
         delta_color="inverse",
     )
-    cards[4].metric(
+    secondary_cards[1].metric(
         "HVAC electricity",
         _format_value(hvac_controlled, " kWh"),
         delta=_signed_percent(hvac_change),
         delta_color="inverse",
     )
-    cards[5].metric(
+    secondary_cards[2].metric(
         "Temp. violation",
         _format_value(
             _metric_value(controlled_metrics, "occupied_temperature_violation_percent"),
@@ -705,11 +734,11 @@ def _decisions(database_path: Path, run_id: str) -> None:
         decision_cards[0].metric("Decisions", len(decisions))
         decision_cards[1].metric(
             "Average latency",
-            _format_value(decisions["latency_ms"].mean(), " ms"),
+            _format_duration_ms(decisions["latency_ms"].mean()),
         )
         decision_cards[2].metric(
             "P95 latency",
-            _format_value(decisions["latency_ms"].quantile(0.95), " ms"),
+            _format_duration_ms(decisions["latency_ms"].quantile(0.95)),
         )
         decision_cards[3].metric(
             "Fallbacks",
@@ -739,7 +768,7 @@ def _decisions(database_path: Path, run_id: str) -> None:
               <strong>{latest_reason}</strong>
               <p>{latest_explanation}</p>
               <small>Observation {latest_observation} ·
-              {_format_value(latest.get("latency_ms"), " ms")}</small>
+              {_format_duration_ms(latest.get("latency_ms"))}</small>
             </div>
             """,
             unsafe_allow_html=True,
@@ -816,18 +845,31 @@ def _reliability(database_path: Path, run_id: str) -> None:
     decisions = queries.recent_decisions(database_path, run_id, limit=10_000)
     actions = queries.recent_actions(database_path, run_id, limit=10_000)
     errors = queries.errors_and_messages(database_path, run_id, limit=500)
-    fallback_count = (
-        int(actions["fallback_status"].map(_is_active_fallback).sum()) if not actions.empty else 0
+    applied_actions = (
+        actions[actions["applied"] == 1] if not actions.empty and "applied" in actions else actions
     )
-    clamp_count = int(actions["clamp_details"].map(_has_clamp).sum()) if not actions.empty else 0
-    timeout_count = (
-        int(decisions["timeout_count"].fillna(0).sum()) if "timeout_count" in decisions else 0
+    verified = queries.verified_metrics(database_path, run_id)
+    fallback_count = _verified_count(
+        verified,
+        "fallback_count",
+        int(applied_actions["fallback_status"].map(_is_active_fallback).sum())
+        if not applied_actions.empty
+        else 0,
     )
-    actionable = (
-        errors[errors["severity"].str.casefold().isin({"warning", "severe", "fatal"})]
-        if not errors.empty
-        else errors
+    clamp_count = _verified_count(
+        verified,
+        "safety_clamp_count",
+        int(applied_actions["clamp_details"].map(_has_clamp).sum())
+        if not applied_actions.empty
+        else 0,
     )
+    timeout_count = _verified_count(
+        verified,
+        "timeout_count",
+        int(decisions["timeout_count"].fillna(0).sum()) if "timeout_count" in decisions else 0,
+    )
+    invalid_count = _verified_count(verified, "invalid_action_count", 0)
+    energyplus_diagnostics, controller_diagnostics = _diagnostic_groups(errors)
     cards = st.columns(4)
     cards[0].metric("Decisions", len(decisions))
     cards[1].metric("Tool calls", len(tools))
@@ -837,44 +879,70 @@ def _reliability(database_path: Path, run_id: str) -> None:
     )
     cards[3].metric(
         "P95 decision latency",
-        _format_value(
-            decisions["latency_ms"].quantile(0.95) if not decisions.empty else None,
-            " ms",
+        _format_duration_ms(
+            decisions["latency_ms"].quantile(0.95) if not decisions.empty else None
         ),
     )
-    recovery_cards = st.columns(4)
+    recovery_cards = st.columns(5)
     recovery_cards[0].metric("Timeouts", timeout_count)
     recovery_cards[1].metric("Fallbacks", fallback_count)
-    recovery_cards[2].metric("Safety clamps", clamp_count)
-    recovery_cards[3].metric(
+    recovery_cards[2].metric("Invalid actions", invalid_count)
+    recovery_cards[3].metric("Safety clamps", clamp_count)
+    recovery_cards[4].metric(
         "Failed tools",
         int((tools["success"] == 0).sum()) if not tools.empty else 0,
     )
-    if actionable.empty:
+    if energyplus_diagnostics.empty:
         st.success("No EnergyPlus warning, severe or fatal diagnostics are recorded.")
     else:
-        severe_count = int(actionable["severity"].str.casefold().isin({"severe", "fatal"}).sum())
+        severe_count = int(
+            energyplus_diagnostics["severity"].str.casefold().isin({"severe", "fatal"}).sum()
+        )
         if severe_count:
-            st.error(f"{severe_count} severe or fatal diagnostic records require review.")
+            st.error(
+                f"EnergyPlus recorded {severe_count} severe or fatal diagnostics; "
+                "comparison claims are suppressed for failed runs."
+            )
         else:
-            st.warning(f"{len(actionable)} warning records are available for review.")
+            st.warning(f"EnergyPlus recorded {len(energyplus_diagnostics)} warning diagnostics.")
+    if not controller_diagnostics.empty:
+        occurrences = int(
+            controller_diagnostics["occurrence_count"].fillna(1).sum()
+            if "occurrence_count" in controller_diagnostics
+            else len(controller_diagnostics)
+        )
+        st.warning(
+            f"{len(controller_diagnostics)} controller diagnostic records "
+            f"({occurrences} occurrences) are preserved separately from EnergyPlus "
+            "diagnostics and require review."
+        )
     if not errors.empty:
-        severity_counts = errors.groupby("severity").size().reset_index(name="count")
+        severity_counts = (
+            errors.assign(
+                diagnostic_source=errors["source"].map(
+                    lambda value: (
+                        "EnergyPlus" if str(value) == "energyplus-message" else "Controller"
+                    )
+                )
+            )
+            .groupby(["diagnostic_source", "severity"])
+            .size()
+            .reset_index(name="count")
+        )
         severity_figure = px.bar(
             severity_counts,
             x="severity",
             y="count",
-            color="severity",
+            color="diagnostic_source",
+            barmode="group",
             color_discrete_map={
-                "information": "#168aad",
-                "warning": "#d97706",
-                "severe": "#dc2626",
-                "fatal": "#7f1d1d",
+                "EnergyPlus": "#168aad",
+                "Controller": "#d97706",
             },
         )
         _style_chart(
             severity_figure,
-            title="EnergyPlus message severity",
+            title="Recorded diagnostics by source",
             yaxis_title="Deduplicated records",
         )
         st.plotly_chart(severity_figure, width="stretch")
@@ -921,7 +989,7 @@ def _style_chart(
         xaxis_title=None,
         template="plotly_white",
         height=340,
-        margin={"l": 24, "r": 18, "t": 58, "b": 24},
+        margin={"l": 24, "r": 18, "t": 76, "b": 24},
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#ffffff",
         font={"family": "Inter, Segoe UI, sans-serif", "color": "#35554b"},
@@ -929,9 +997,9 @@ def _style_chart(
         legend={
             "orientation": "h",
             "yanchor": "bottom",
-            "y": 1.02,
-            "xanchor": "right",
-            "x": 1,
+            "y": 1.08,
+            "xanchor": "left",
+            "x": 0,
         },
     )
     figure.update_xaxes(showgrid=False, linecolor="#dce8e2")
@@ -1006,6 +1074,45 @@ def _metric_value(metrics: dict[str, dict[str, Any]], name: str) -> float | None
     if not item or item.get("value") is None:
         return None
     return float(item["value"])
+
+
+def _verified_count(
+    metrics: dict[str, dict[str, Any]],
+    name: str,
+    fallback: int,
+) -> int:
+    value = _metric_value(metrics, name)
+    return fallback if value is None else int(value)
+
+
+def _format_duration_ms(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "Unavailable"
+    milliseconds = float(value)
+    if abs(milliseconds) >= 1_000:
+        return f"{milliseconds / 1_000:,.2f} s"
+    return f"{milliseconds:,.2f} ms"
+
+
+def _preferred_controlled_index(controlled: pd.DataFrame) -> int:
+    priorities = ("agent", "rule", "replay", "fixed_override")
+    run_types = controlled["run_type"].astype(str).tolist()
+    for priority in priorities:
+        for index, run_type in enumerate(run_types):
+            if run_type == priority:
+                return index
+    return 0
+
+
+def _diagnostic_groups(errors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if errors.empty:
+        return errors.copy(), errors.copy()
+    actionable = errors[
+        errors["severity"].astype(str).str.casefold().isin({"warning", "severe", "fatal"})
+    ]
+    energyplus = actionable[actionable["source"] == "energyplus-message"]
+    controller = actionable[actionable["source"] != "energyplus-message"]
+    return energyplus, controller
 
 
 def _format_value(value: Any, suffix: str = "") -> str:
@@ -1185,21 +1292,38 @@ def _apply_style() -> None:
             font-weight: 780;
             letter-spacing: -.025em;
         }
-        div[data-baseweb="tab-list"] {
+        [data-testid="stTabs"] [role="tablist"] {
             gap: .35rem;
             padding: .3rem;
             border: 1px solid var(--eco-line);
             border-radius: 14px;
             background: rgba(255, 255, 255, .86);
         }
-        button[data-baseweb="tab"] {
+        [data-testid="stTabs"] [role="tab"] {
             height: 2.6rem;
             padding: 0 .85rem;
             border-radius: 10px;
         }
-        button[data-baseweb="tab"][aria-selected="true"] {
-            color: #ffffff;
-            background: var(--eco-green);
+        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
+            color: #ffffff !important;
+            background: var(--eco-green) !important;
+        }
+        [data-testid="stTabs"] [role="tab"][aria-selected="true"] p {
+            color: #ffffff !important;
+        }
+        [data-testid="stTabs"] .react-aria-SelectionIndicator {
+            display: none;
+        }
+        [data-testid="stSidebar"] .stButton > button {
+            color: #ffffff !important;
+            border-color: var(--eco-green) !important;
+            background: var(--eco-green) !important;
+        }
+        [data-testid="stSidebar"] .stButton > button p {
+            color: #ffffff !important;
+        }
+        [data-baseweb="tag"] {
+            background-color: var(--eco-green) !important;
         }
         [data-testid="stDataFrame"] {
             overflow: hidden;

@@ -2,9 +2,15 @@
 
 from datetime import UTC, datetime, timedelta
 
+import pandas as pd
 from streamlit.testing.v1 import AppTest
 
 from ecoloop.config import get_settings, repository_root
+from ecoloop.dashboard.app import (
+    _diagnostic_groups,
+    _format_duration_ms,
+    _preferred_controlled_index,
+)
 from ecoloop.db.store import SQLiteStore
 from ecoloop.schemas import BuildingTelemetry, RunStatus, RunType
 
@@ -62,3 +68,44 @@ def test_dashboard_renders_all_production_tabs_without_exceptions(
         "Methodology",
     ]
     assert len(rendered.metric) >= 9
+
+
+def test_dashboard_prefers_agent_evidence_and_formats_long_latency() -> None:
+    controlled = pd.DataFrame(
+        [
+            {"run_id": "replay-newest", "run_type": "replay"},
+            {"run_id": "agent-week", "run_type": "agent"},
+            {"run_id": "rule-smoke", "run_type": "rule"},
+        ]
+    )
+
+    assert _preferred_controlled_index(controlled) == 1
+    assert _format_duration_ms(14_672.0137) == "14.67 s"
+    assert _format_duration_ms(128.84) == "128.84 ms"
+
+
+def test_dashboard_separates_energyplus_and_controller_diagnostics() -> None:
+    errors = pd.DataFrame(
+        [
+            {
+                "severity": "severe",
+                "source": "coordinator",
+                "occurrence_count": 3,
+            },
+            {
+                "severity": "warning",
+                "source": "energyplus-message",
+                "occurrence_count": 1,
+            },
+            {
+                "severity": "information",
+                "source": "energyplus-message",
+                "occurrence_count": 1,
+            },
+        ]
+    )
+
+    energyplus, controller = _diagnostic_groups(errors)
+
+    assert energyplus["severity"].tolist() == ["warning"]
+    assert controller["severity"].tolist() == ["severe"]
