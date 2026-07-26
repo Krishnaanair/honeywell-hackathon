@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from ecoloop.config import Settings
-from ecoloop.doctor import CheckStatus, run_doctor
+from ecoloop.doctor import CheckStatus, _ollama_tags, run_doctor
 from ecoloop.energyplus.discovery import EnergyPlusInstallation
 
 
@@ -87,3 +89,29 @@ def test_doctor_missing_energyplus_and_weather_is_blocked(
         for check in report.checks
     )
     assert any(check.name == "Weather file" and check.fix for check in report.checks)
+
+
+@pytest.mark.parametrize(
+    "host",
+    [
+        "https://ollama.com",
+        "http://example.com:11434",
+        "ftp://127.0.0.1:11434",
+        "http://" + "user" + ":" + "pass" + "@127.0.0.1:11434",
+        "http://127.0.0.1:11434/api",
+        "http://127.0.0.1:invalid",
+    ],
+)
+def test_doctor_rejects_non_local_or_ambiguous_ollama_host_without_network(
+    host: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_network(*args: object, **kwargs: object) -> None:
+        pytest.fail("invalid OLLAMA_HOST must be rejected before network access")
+
+    monkeypatch.setattr("ecoloop.doctor.urllib.request.urlopen", unexpected_network)
+
+    names, error = _ollama_tags(host)
+
+    assert names is None
+    assert "OLLAMA_HOST" in error

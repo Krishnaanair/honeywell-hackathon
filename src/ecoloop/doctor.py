@@ -8,6 +8,7 @@ import platform
 import shutil
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import asdict, dataclass
 from enum import StrEnum
@@ -156,9 +157,10 @@ def _find_uv() -> Path | None:
 
 
 def _ollama_tags(host: str) -> tuple[tuple[str, ...] | None, str]:
+    host_error = _local_ollama_host_error(host)
+    if host_error is not None:
+        return None, host_error
     endpoint = host.rstrip("/") + "/api/tags"
-    if not endpoint.casefold().startswith(("http://", "https://")):
-        return None, "OLLAMA_HOST must use http:// or https://"
     request = urllib.request.Request(  # noqa: S310 - scheme restricted above
         endpoint,
         headers={"Accept": "application/json"},
@@ -179,6 +181,25 @@ def _ollama_tags(host: str) -> tuple[tuple[str, ...] | None, str]:
         if isinstance(name, str):
             names.append(name)
     return tuple(names), ""
+
+
+def _local_ollama_host_error(host: str) -> str | None:
+    """Return why an Ollama URL violates the local-only runtime boundary."""
+
+    try:
+        parsed = urllib.parse.urlparse(host)
+        _ = parsed.port
+    except ValueError:
+        return "OLLAMA_HOST contains an invalid port"
+    if parsed.scheme not in {"http", "https"}:
+        return "OLLAMA_HOST must use http:// or https://"
+    if parsed.hostname not in {"127.0.0.1", "localhost", "::1"}:
+        return "OLLAMA_HOST must target a loopback address"
+    if parsed.username or parsed.password:
+        return "OLLAMA_HOST must not contain credentials"
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        return "OLLAMA_HOST must not contain a path, query, or fragment"
+    return None
 
 
 def _path_from_setting(settings: Settings, method: str, fallback: Path) -> Path:
