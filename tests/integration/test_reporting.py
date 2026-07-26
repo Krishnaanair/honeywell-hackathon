@@ -55,6 +55,22 @@ def _run_git(root: Path, *arguments: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
+def _commit_index(root: Path, message: str = "fixture") -> None:
+    _run_git(
+        root,
+        "-c",
+        "user.name=EcoLoop Tests",
+        "-c",
+        "user.email=ecoloop-tests@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "--quiet",
+        "-m",
+        message,
+    )
+
+
 def test_render_text_pdf_is_reopenable_and_contains_title(tmp_path):
     source = tmp_path / "report.md"
     source.write_text(
@@ -343,7 +359,13 @@ def test_export_run_rejects_run_id_path_traversal_before_creating_output(
     assert not (tmp_path / "escaped").exists()
 
 
-def test_source_zip_uses_release_allowlist_and_excludes_runtime_data(tmp_path):
+def test_source_zip_uses_release_allowlist_and_excludes_runtime_data(tmp_path, monkeypatch):
+    monkeypatch.setattr(reporting, "_git_clean_source_commit", lambda _root: "0" * 40)
+    monkeypatch.setattr(
+        reporting,
+        "_SOURCE_ARCHIVE_REQUIRED_PATHS",
+        reporting._SOURCE_ARCHIVE_REQUIRED_PATHS - {".gitattributes"},
+    )
     archive_path = tmp_path / "ecoloop-source.zip"
     _write_source_zip(repository_root(), archive_path)
 
@@ -382,6 +404,7 @@ def test_source_zip_git_mode_uses_tracked_and_exact_generated_paths(
     _write_fixture(root, "config/credentials-prod.json", '{"value": "not-packaged"}\n')
     _write_fixture(root, "docs/unapproved.pptx")
     _run_git(root, "add", "--all")
+    _commit_index(root)
 
     _write_fixture(root, "docs/unreviewed.md", "not reviewed\n")
     _write_fixture(root, "results/unreviewed.json", "{}\n")
@@ -404,6 +427,83 @@ def test_source_zip_git_mode_uses_tracked_and_exact_generated_paths(
     ]
 
 
+def test_source_zip_matches_git_text_and_preserves_binary_and_untracked_bytes(
+    tmp_path,
+    monkeypatch,
+):
+    root = tmp_path / "repository"
+    root.mkdir()
+    _run_git(root, "init", "--quiet")
+    monkeypatch.setattr(
+        reporting,
+        "_SOURCE_ARCHIVE_REQUIRED_PATHS",
+        frozenset({".gitattributes", "README.md"}),
+    )
+
+    attributes = "* text=auto eol=lf\n*.png binary\n*.pptx binary\n"
+    _write_fixture(root, ".gitattributes", attributes)
+    _write_fixture(root, "README.md", "# Canonical source\n")
+    _write_fixture(root, "src/application.py", "VALUE = 1\n")
+    binary = b"\x89PNG\r\n\x1a\n\x00binary\r\npayload\r"
+    binary_path = root / "assets" / "logo.png"
+    binary_path.parent.mkdir(parents=True)
+    binary_path.write_bytes(binary)
+    _run_git(root, "add", "--all")
+    _commit_index(root)
+
+    (root / "README.md").write_bytes(b"# Canonical source\r\n")
+    (root / "src" / "application.py").write_bytes(b"VALUE = 1\r\n")
+    metrics_path = root / "results" / "metrics.json"
+    metrics_path.parent.mkdir(parents=True)
+    metrics_path.write_bytes(b'{"verified": true}\r\n')
+    presentation = root / "presentation" / "ecoloop-submission.pptx"
+    _write_minimal_presentation(presentation)
+    presentation_bytes = presentation.read_bytes()
+
+    archive_path = tmp_path / "canonical.zip"
+    source_commit = _write_source_zip(root, archive_path)
+
+    assert source_commit == _run_git(root, "rev-parse", "HEAD").stdout.decode().strip()
+    assert _run_git(root, "status", "--porcelain=v1", "--untracked-files=no").stdout == b""
+    with zipfile.ZipFile(archive_path) as archive:
+        assert archive.read("README.md") == _run_git(root, "show", "HEAD:README.md").stdout
+        assert (
+            archive.read("src/application.py")
+            == _run_git(root, "show", "HEAD:src/application.py").stdout
+        )
+        assert archive.read("assets/logo.png") == binary
+        assert archive.read("results/metrics.json") == b'{"verified": true}\n'
+        assert archive.read("presentation/ecoloop-submission.pptx") == presentation_bytes
+
+
+@pytest.mark.parametrize("staged", [False, True])
+def test_source_zip_blocks_uncommitted_tracked_worktree_or_index_changes(
+    tmp_path,
+    monkeypatch,
+    staged,
+):
+    root = tmp_path / "repository"
+    root.mkdir()
+    _run_git(root, "init", "--quiet")
+    monkeypatch.setattr(reporting, "_SOURCE_ARCHIVE_REQUIRED_PATHS", frozenset({"README.md"}))
+    _write_fixture(root, "README.md", "# Committed source\n")
+    _run_git(root, "add", "README.md")
+    _commit_index(root)
+
+    _write_fixture(root, "README.md", "# Dirty source\n")
+    if staged:
+        _run_git(root, "add", "README.md")
+
+    archive_path = tmp_path / "blocked.zip"
+    with pytest.raises(
+        PackagingError,
+        match="tracked source or index changes are uncommitted",
+    ):
+        _write_source_zip(root, archive_path)
+
+    assert not archive_path.exists()
+
+
 def test_source_zip_non_git_fallback_is_restricted(tmp_path, monkeypatch):
     root = tmp_path / "unpacked-source"
     root.mkdir()
@@ -412,20 +512,26 @@ def test_source_zip_non_git_fallback_is_restricted(tmp_path, monkeypatch):
 
     _write_fixture(root, "README.md", "# Unpacked release\n")
     _write_fixture(root, "src/application.py", "VALUE = 1\n")
-    _write_fixture(root, "docs/guide.md", "Safe documentation.\n")
+    (root / "docs").mkdir()
+    (root / "docs" / "guide.md").write_bytes(b"Safe documentation.\r\n")
     _write_fixture(root, "runs/eplusout.sql")
     _write_fixture(root, "weather/default.epw")
     _write_fixture(root, "config/.env.local", "PASS" + "WORD=not-packaged\n")
     _write_fixture(root, "results/unreviewed.json", "{}\n")
     _write_fixture(root, "results/comparison.json", '{"status": "verified"}\n')
-    _write_minimal_presentation(root / "presentation" / "template.pptx")
-    _write_minimal_presentation(root / "presentation" / "ecoloop-submission.pptx")
+    template = root / "presentation" / "template.pptx"
+    completed_presentation = root / "presentation" / "ecoloop-submission.pptx"
+    _write_minimal_presentation(template)
+    _write_minimal_presentation(completed_presentation)
+    completed_presentation_bytes = completed_presentation.read_bytes()
 
     archive_path = tmp_path / "fallback.zip"
-    _write_source_zip(root, archive_path)
+    assert _write_source_zip(root, archive_path) is None
 
     with zipfile.ZipFile(archive_path) as archive:
         names = set(archive.namelist())
+        assert archive.read("docs/guide.md") == b"Safe documentation.\n"
+        assert archive.read("presentation/ecoloop-submission.pptx") == completed_presentation_bytes
     assert {
         "README.md",
         "docs/guide.md",
@@ -464,6 +570,7 @@ def test_source_zip_blocks_sensitive_tracked_content(
             Path("docs/leak.txt"): "100644",
         },
     )
+    monkeypatch.setattr(reporting, "_git_clean_source_commit", lambda _root: "0" * 40)
     monkeypatch.setattr(reporting, "_SOURCE_ARCHIVE_REQUIRED_PATHS", frozenset({"README.md"}))
     archive_path = tmp_path / "blocked.zip"
 
@@ -483,6 +590,7 @@ def test_source_zip_blocks_host_path_inside_generated_presentation(tmp_path, mon
         "_git_tracked_files",
         lambda _root: {Path("README.md"): "100644"},
     )
+    monkeypatch.setattr(reporting, "_git_clean_source_commit", lambda _root: "0" * 40)
     monkeypatch.setattr(reporting, "_SOURCE_ARCHIVE_REQUIRED_PATHS", frozenset({"README.md"}))
 
     with pytest.raises(PackagingError, match="host-specific path"):
@@ -503,6 +611,7 @@ def test_source_zip_excludes_git_symlink_and_oversized_file(tmp_path, monkeypatc
             Path("src/link.py"): "120000",
         },
     )
+    monkeypatch.setattr(reporting, "_git_clean_source_commit", lambda _root: "0" * 40)
     monkeypatch.setattr(reporting, "_SOURCE_ARCHIVE_MAX_BYTES", 32)
     monkeypatch.setattr(reporting, "_SOURCE_ARCHIVE_REQUIRED_PATHS", frozenset({"README.md"}))
 

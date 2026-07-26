@@ -59,6 +59,7 @@ _SOURCE_ARCHIVE_FALLBACK_DIRECTORIES = (
 )
 _SOURCE_ARCHIVE_FALLBACK_FILES = (
     ".env.example",
+    ".gitattributes",
     ".gitignore",
     "AGENTS.md",
     "LICENSE",
@@ -92,6 +93,7 @@ _SOURCE_ARCHIVE_PRESENTATION_PATHS = frozenset(
 _SOURCE_ARCHIVE_REQUIRED_PATHS = frozenset(
     {
         ".env.example",
+        ".gitattributes",
         ".github/workflows/ci.yml",
         ".gitignore",
         "AGENTS.md",
@@ -914,7 +916,7 @@ def package_submission(settings: Settings) -> dict[str, Any]:
     skipped: list[dict[str, str]] = []
 
     source_zip = submission / "ecoloop-source.zip"
-    _write_source_zip(root, source_zip)
+    source_commit = _write_source_zip(root, source_zip)
     generated.append(source_zip)
 
     pdf_sources = (
@@ -974,7 +976,7 @@ def package_submission(settings: Settings) -> dict[str, Any]:
     manifest = {
         "project": "EcoLoop Building Agents",
         "created_at": datetime.now(UTC).isoformat(),
-        "source_commit": _git_commit(root),
+        "source_commit": source_commit,
         "artifacts": [
             {
                 "path": path.name,
@@ -1007,7 +1009,7 @@ def _clear_stale_submission_artifacts(submission: Path) -> None:
         (submission / name).unlink(missing_ok=True)
 
 
-def _write_source_zip(root: Path, output: Path) -> None:
+def _write_source_zip(root: Path, output: Path) -> str | None:
     """Write a deterministic, reviewed source archive.
 
     A Git checkout contributes only paths recorded in its index. Exact result
@@ -1015,7 +1017,11 @@ def _write_source_zip(root: Path, output: Path) -> None:
     final evidence bundle can be assembled without committing run data. A
     source tree without its own Git metadata uses a restricted directory walk;
     this supports unpacked source distributions while retaining every archive
-    safety check.
+    safety check. Text payloads use canonical LF line endings, while binary
+    payloads retain their exact bytes.
+
+    Returns the verified source commit for a Git checkout, or ``None`` for the
+    restricted non-Git fallback.
     """
 
     resolved_root = root.expanduser().resolve()
@@ -1025,7 +1031,9 @@ def _write_source_zip(root: Path, output: Path) -> None:
     resolved_output.parent.mkdir(parents=True, exist_ok=True)
     resolved_output.unlink(missing_ok=True)
 
-    candidates = _source_archive_candidates(resolved_root)
+    tracked = _git_tracked_files(resolved_root)
+    source_commit = _git_clean_source_commit(resolved_root) if tracked is not None else None
+    candidates = _source_archive_candidates(resolved_root, tracked)
     entries = _source_archive_entries(resolved_root, candidates)
     names = {name for name, _ in entries}
     missing = _SOURCE_ARCHIVE_REQUIRED_PATHS - names
@@ -1047,17 +1055,27 @@ def _write_source_zip(root: Path, output: Path) -> None:
                 info.external_attr = mode << 16
                 archive.writestr(
                     info,
-                    path.read_bytes(),
+                    _source_archive_payload(path),
                     compress_type=zipfile.ZIP_DEFLATED,
                     compresslevel=9,
+                )
+        if source_commit is not None:
+            final_commit = _git_clean_source_commit(resolved_root)
+            if final_commit != source_commit:
+                raise PackagingError(
+                    "Git HEAD changed while the source archive was being generated; "
+                    "rerun packaging from a stable checkout."
                 )
     except (OSError, RuntimeError, zipfile.BadZipFile):
         resolved_output.unlink(missing_ok=True)
         raise
+    return source_commit
 
 
-def _source_archive_candidates(root: Path) -> dict[Path, str | None]:
-    tracked = _git_tracked_files(root)
+def _source_archive_candidates(
+    root: Path,
+    tracked: Mapping[Path, str] | None,
+) -> dict[Path, str | None]:
     candidates: dict[Path, str | None] = (
         _fallback_source_archive_candidates(root) if tracked is None else dict(tracked)
     )
@@ -1124,6 +1142,47 @@ def _git_tracked_files(root: Path) -> dict[Path, str] | None:
         relative = Path(os.fsdecode(raw_path))
         tracked[relative] = mode
     return tracked
+
+
+def _git_clean_source_commit(root: Path) -> str:
+    """Return ``HEAD`` only when tracked worktree and index content are clean."""
+
+    commands = (
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=no"],
+        ["git", "rev-parse", "--verify", "HEAD"],
+    )
+    completed: list[subprocess.CompletedProcess[bytes]] = []
+    for command in commands:
+        try:
+            result = subprocess.run(  # noqa: S603
+                command,
+                cwd=root,
+                check=False,
+                capture_output=True,
+                shell=False,
+                timeout=_SOURCE_ARCHIVE_GIT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PackagingError(
+                "Git metadata exists, but source provenance could not be verified safely."
+            ) from exc
+        if result.returncode != 0:
+            raise PackagingError(
+                "Git metadata exists, but source provenance could not be verified safely."
+            )
+        completed.append(result)
+
+    if completed[0].stdout:
+        raise PackagingError(
+            "source packaging blocked: tracked source or index changes are uncommitted"
+        )
+    try:
+        commit = completed[1].stdout.strip().decode("ascii", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise PackagingError("Git returned a malformed source commit.") from exc
+    if re.fullmatch(r"[0-9a-fA-F]{40,64}", commit) is None:
+        raise PackagingError("Git returned a malformed source commit.")
+    return commit.lower()
 
 
 def _fallback_source_archive_candidates(root: Path) -> dict[Path, str | None]:
@@ -1245,6 +1304,15 @@ def _source_archive_content_violation(path: Path, root: Path) -> str | None:
         if _contains_host_specific_path(text, root):
             return "host-specific path"
     return None
+
+
+def _source_archive_payload(path: Path) -> bytes:
+    """Read one archive payload with canonical line endings for approved text."""
+
+    data = path.read_bytes()
+    if path.suffix.casefold() in _SOURCE_ARCHIVE_TEXT_SUFFIXES:
+        return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return data
 
 
 def _source_archive_text_fragments(path: Path) -> tuple[tuple[str, ...], str | None]:
@@ -1666,18 +1734,3 @@ def _convert_with_powerpoint(presentation: Path, output_dir: Path) -> Path:
 def _write_checksums(paths: Sequence[Path], output: Path) -> None:
     lines = [f"{sha256_file(path)}  {path.name}" for path in sorted(paths)]
     output.write_text("\n".join(lines) + "\n", encoding="ascii")
-
-
-def _git_commit(root: Path) -> str | None:
-    git = shutil.which("git")
-    if git is None:
-        return None
-    completed = subprocess.run(  # noqa: S603
-        [git, "rev-parse", "HEAD"],
-        cwd=root,
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=10,
-    )
-    return completed.stdout.strip() if completed.returncode == 0 else None
