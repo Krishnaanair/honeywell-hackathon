@@ -1,0 +1,304 @@
+{
+  "average_decision_latency_ms": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "ms",
+    "value": 12367.361932941083,
+    "value_json": null,
+    "verified": true
+  },
+  "comfort_air_temperature_fallback_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "zone-timesteps",
+    "value": 0.0,
+    "value_json": null,
+    "verified": true
+  },
+  "comparison": {
+    "source": "verified_completed_run_comparison_v1",
+    "timestamp": "2026-07-26T13:41:00.216829Z",
+    "units": null,
+    "value": null,
+    "value_json": {
+      "agent_comfort_compliance_percent": 90.3076923076923,
+      "agent_facility_electricity_kwh": 1245.564416842928,
+      "agent_hvac_electricity_kwh": 580.389416842928,
+      "agent_peak_demand_kw": 24.2293835189757,
+      "agent_run_id": "agent-20260726T130255Z-65de6a32",
+      "baseline_comfort_compliance_percent": 67.76923076923077,
+      "baseline_facility_electricity_kwh": 1126.9604940141178,
+      "baseline_hvac_electricity_kwh": 461.7854940141178,
+      "baseline_peak_demand_kw": 23.006487867801226,
+      "baseline_run_id": "baseline-20260726T105124Z-4adce000",
+      "carbon_saving_kg": -83.0227459801672,
+      "carbon_saving_percent": -10.52423074799679,
+      "cost_saving": -14.232470739457227,
+      "cost_saving_percent": -10.524230747996782,
+      "electricity_saving_percent": -10.524230747996786,
+      "other_fuels": {},
+      "peak_reduction_percent": -5.315438228561509,
+      "timestamp": "2026-07-26T13:41:00.216829Z"
+    },
+    "verified": true
+  },
+  "cost": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "configured_currency",
+    "value": 149.46773002115137,
+    "value_json": null,
+    "verified": true
+  },
+  "energy_cross_check": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": null,
+    "value": null,
+    "value_json": {
+      "absolute_difference_kwh": 2.2737367544323206e-13,
+      "difference_percent": 1.8254670121320995e-14,
+      "official_kwh": 1245.564416842928,
+      "passed": true,
+      "telemetry_kwh": 1245.5644168429283,
+      "tolerance_percent": 2.0
+    },
+    "verified": true
+  },
+  "facility_electricity_kwh": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "kWh",
+    "value": 1245.564416842928,
+    "value_json": null,
+    "verified": true
+  },
+  "fallback_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 11.0,
+    "value_json": null,
+    "verified": true
+  },
+  "fatal_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 0.0,
+    "value_json": null,
+    "verified": true
+  },
+  "final_run_metrics": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": null,
+    "value": null,
+    "value_json": {
+      "average_decision_latency_ms": 12367.361932941083,
+      "cost": 149.46773002115137,
+      "energy_cross_check": {
+        "absolute_difference_kwh": 2.2737367544323206e-13,
+        "difference_percent": 1.8254670121320995e-14,
+        "official_kwh": 1245.564416842928,
+        "passed": true,
+        "telemetry_kwh": 1245.5644168429283,
+        "tolerance_percent": 2.0
+      },
+      "facility_electricity_kwh": 1245.564416842928,
+      "fallback_count": 11,
+      "fatal_count": 0,
+      "hvac_electricity_kwh": 580.389416842928,
+      "invalid_action_count": 13,
+      "is_fake": false,
+      "llm_decision_count": 170,
+      "maximum_occupied_co2_ppm": null,
+      "mean_ppd_percent": 6.696541822769581,
+      "occupied_temperature_violation_degree_hours": 22.360348600699993,
+      "occupied_temperature_violation_percent": 9.692307692307692,
+      "operational_carbon_kg": 871.8950917900496,
+      "other_fuels_kwh": {},
+      "p95_decision_latency_ms": 14672.013729999888,
+      "peak_electrical_demand_kw": 24.2293835189757,
+      "pmv_compliance_percent": 97.46153846153847,
+      "run_id": "agent-20260726T130255Z-65de6a32",
+      "run_type": "agent",
+      "safety_clamp_count": 24,
+      "severe_count": 0,
+      "simulation_end": "1986-07-22T00:00:00Z",
+      "simulation_start": "1986-07-15T00:00:00Z",
+      "source_artifacts": [
+        "run/energyplus/eplusout.end",
+        "run/energyplus/eplusout.err",
+        "run/energyplus/eplusout.sql"
+      ],
+      "status": "completed",
+      "timeout_count": 0,
+      "timestamp": "2026-07-26T13:40:49.359453Z",
+      "tool_call_count": 788,
+      "warning_count": 0
+    },
+    "verified": true
+  },
+  "finalization_verification": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": null,
+    "value": null,
+    "value_json": {
+      "reasons": [],
+      "source": "official_energyplus_plus_sqlite_audit_v1",
+      "timeout_count_semantics": "Sum of local inference timeout attempts persisted with each supervisory decision, including recovered retries.",
+      "verified_for_comparison": true
+    },
+    "verified": true
+  },
+  "hvac_electricity_kwh": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "kWh",
+    "value": 580.389416842928,
+    "value_json": null,
+    "verified": true
+  },
+  "invalid_action_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 13.0,
+    "value_json": null,
+    "verified": true
+  },
+  "llm_decision_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 170.0,
+    "value_json": null,
+    "verified": true
+  },
+  "mean_ppd_percent": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "%",
+    "value": 6.696541822769581,
+    "value_json": null,
+    "verified": true
+  },
+  "occupied_temperature_violation_degree_hours": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "degree-hour",
+    "value": 22.360348600699993,
+    "value_json": null,
+    "verified": true
+  },
+  "occupied_temperature_violation_percent": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "%",
+    "value": 9.692307692307692,
+    "value_json": null,
+    "verified": true
+  },
+  "operational_carbon_kg": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "kgCO2e",
+    "value": 871.8950917900496,
+    "value_json": null,
+    "verified": true
+  },
+  "other_fuels_kwh": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": null,
+    "value": null,
+    "value_json": {},
+    "verified": true
+  },
+  "p95_decision_latency_ms": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "ms",
+    "value": 14672.013729999888,
+    "value_json": null,
+    "verified": true
+  },
+  "peak_electrical_demand_kw": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "kW",
+    "value": 24.2293835189757,
+    "value_json": null,
+    "verified": true
+  },
+  "pmv_compliance_percent": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "%",
+    "value": 97.46153846153847,
+    "value_json": null,
+    "verified": true
+  },
+  "preparation_fingerprint": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": null,
+    "value": null,
+    "value_json": {
+      "sha256": "09558397d303ca52813cc7354fd34af8a9ef2d4cd100fe30732c555c89337230"
+    },
+    "verified": true
+  },
+  "safety_clamp_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 24.0,
+    "value_json": null,
+    "verified": true
+  },
+  "severe_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 0.0,
+    "value_json": null,
+    "verified": true
+  },
+  "timeout_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 0.0,
+    "value_json": null,
+    "verified": true
+  },
+  "tool_call_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 788.0,
+    "value_json": null,
+    "verified": true
+  },
+  "warning_count": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": "count",
+    "value": 0.0,
+    "value_json": null,
+    "verified": true
+  },
+  "weather_sha256": {
+    "source": "official_energyplus_plus_sqlite_audit_v1",
+    "timestamp": "2026-07-26T13:40:49.359453Z",
+    "units": null,
+    "value": null,
+    "value_json": {
+      "sha256": "c7d4efcf93ba316a1d874352e743df5cf137ba5c0e3459eb2dc4b5442d5b7f5c"
+    },
+    "verified": true
+  }
+}

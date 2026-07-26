@@ -1,0 +1,20 @@
+{
+  "agent_comfort_compliance_percent": 90.3076923076923,
+  "agent_facility_electricity_kwh": 1245.564416842928,
+  "agent_hvac_electricity_kwh": 580.389416842928,
+  "agent_peak_demand_kw": 24.2293835189757,
+  "agent_run_id": "agent-20260726T130255Z-65de6a32",
+  "baseline_comfort_compliance_percent": 67.76923076923077,
+  "baseline_facility_electricity_kwh": 1126.9604940141178,
+  "baseline_hvac_electricity_kwh": 461.7854940141178,
+  "baseline_peak_demand_kw": 23.006487867801226,
+  "baseline_run_id": "baseline-20260726T105124Z-4adce000",
+  "carbon_saving_kg": -83.0227459801672,
+  "carbon_saving_percent": -10.52423074799679,
+  "cost_saving": -14.232470739457227,
+  "cost_saving_percent": -10.524230747996782,
+  "electricity_saving_percent": -10.524230747996786,
+  "other_fuels": {},
+  "peak_reduction_percent": -5.315438228561509,
+  "timestamp": "2026-07-26T13:41:00.216829Z"
+}
