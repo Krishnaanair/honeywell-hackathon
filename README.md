@@ -44,8 +44,14 @@
 
 ## 🎬 Demonstration video
 
-**[▶ Watch the 3-minute proof-of-concept demonstration](docs/video/EcoLoop_Demonstration.mp4)**
-*(click "View raw" to download — the file is stored with Git LFS)*
+<div align="center">
+
+https://github.com/Krishnaanair/honeywell-hackathon/releases/download/v1.0-submission/EcoLoop_Demonstration.mp4
+
+**[▶ Open the 3-minute demonstration in a new tab](https://github.com/Krishnaanair/honeywell-hackathon/releases/download/v1.0-submission/EcoLoop_Demonstration.mp4)**
+· [also committed in-repo](docs/video/EcoLoop_Demonstration.mp4)
+
+</div>
 
 The video shows the loop actually running: live telemetry leaving EnergyPlus,
 the local model reasoning over it, MCP tool calls executing, the safety layer
