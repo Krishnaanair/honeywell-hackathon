@@ -1005,6 +1005,198 @@ def comfort_distribution(
     return pd.DataFrame(rows, columns=COMFORT_DISTRIBUTION_COLUMNS)
 
 
+def latest_tool_call(
+    database_path: Path,
+    run_id: str,
+    *,
+    tool_name: str | None = None,
+) -> dict[str, Any] | None:
+    """Return the most recent MCP tool call with its argument and result payloads.
+
+    ``tool_name`` optionally narrows the lookup to one tool, for example
+    ``apply_control_action``. Returns ``None`` when no matching call exists.
+    """
+
+    with readonly_connection(database_path) as connection:
+        _require_real_run(connection, run_id)
+        if tool_name is None:
+            row = connection.execute(
+                """
+                SELECT timestamp, sequence, tool_name, arguments_json, result_json,
+                       success, error, duration_ms, control_affecting
+                FROM tool_calls
+                WHERE run_id = ?
+                ORDER BY timestamp DESC, sequence DESC
+                LIMIT 1
+                """,
+                (run_id,),
+            ).fetchone()
+        else:
+            row = connection.execute(
+                """
+                SELECT timestamp, sequence, tool_name, arguments_json, result_json,
+                       success, error, duration_ms, control_affecting
+                FROM tool_calls
+                WHERE run_id = ? AND tool_name = ?
+                ORDER BY timestamp DESC, sequence DESC
+                LIMIT 1
+                """,
+                (run_id, tool_name),
+            ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def simulation_message_counts(database_path: Path, run_id: str) -> dict[str, int]:
+    """Return persisted EnergyPlus message occurrence totals per severity.
+
+    An empty mapping means no engine messages were recorded for the run; the
+    dashboard must render that as an explicit empty state, not as zeros of an
+    unmeasured quantity.
+    """
+
+    with readonly_connection(database_path) as connection:
+        _require_real_run(connection, run_id)
+        rows = connection.execute(
+            """
+            SELECT severity, SUM(occurrence_count) AS occurrences
+            FROM simulation_messages
+            WHERE run_id = ?
+            GROUP BY severity
+            """,
+            (run_id,),
+        ).fetchall()
+    return {str(row["severity"]).casefold(): int(row["occurrences"] or 0) for row in rows}
+
+
+def action_log(database_path: Path, run_id: str, *, limit: int = 25) -> pd.DataFrame:
+    """Return the control-action audit trail with simulated observation time.
+
+    Applied values come only from the physically applied record; rows that were
+    never applied keep an empty applied display so proposals are not presented
+    as actuations.
+    """
+
+    _validate_limit(limit)
+    with readonly_connection(database_path) as connection:
+        _require_real_run(connection, run_id)
+    frame = _read_frame(
+        database_path,
+        """
+        SELECT o.simulation_timestamp AS simulation_timestamp,
+               p.timestamp, p.observation_id, p.action_generation, p.action_id,
+               p.proposed_values_json,
+               a.applied_values_json AS applied_values_json,
+               CASE WHEN a.action_id IS NULL
+                    THEN p.validation_result_json ELSE a.validation_result_json
+               END AS validation_result_json,
+               CASE WHEN a.action_id IS NULL
+                    THEN p.clamp_details_json ELSE a.clamp_details_json
+               END AS clamp_details_json,
+               CASE WHEN a.action_id IS NULL
+                    THEN p.fallback_status ELSE a.fallback_status
+               END AS fallback_status,
+               p.reason_code, p.model, p.latency_ms,
+               CASE WHEN a.action_id IS NULL THEN 0 ELSE 1 END AS applied
+        FROM proposed_actions AS p
+        LEFT JOIN applied_actions AS a ON a.action_id = p.action_id
+        LEFT JOIN observations AS o
+            ON o.observation_id = p.observation_id AND o.run_id = p.run_id
+        WHERE p.run_id = ?
+        ORDER BY p.observation_id DESC, p.action_generation DESC
+        LIMIT ?
+        """,
+        (run_id, limit),
+        parse_dates=("simulation_timestamp", "timestamp"),
+    )
+    for column in (
+        "proposed_values_json",
+        "applied_values_json",
+        "validation_result_json",
+        "clamp_details_json",
+    ):
+        if column in frame:
+            frame[column.removesuffix("_json")] = frame[column].map(_json_display)
+    return frame
+
+
+def system_console_events(database_path: Path, run_id: str, *, limit: int = 30) -> pd.DataFrame:
+    """Merge persisted tool calls, applied actions and engine messages.
+
+    Every returned row is a durable database record with its wall timestamp;
+    the console never synthesizes events.
+    """
+
+    _validate_limit(limit)
+    with readonly_connection(database_path) as connection:
+        _require_real_run(connection, run_id)
+    return _read_frame(
+        database_path,
+        """
+        SELECT timestamp, source, label, status, detail FROM (
+            SELECT timestamp, 'mcp' AS source, tool_name AS label,
+                   CASE WHEN success = 1 THEN 'ok' ELSE 'error' END AS status,
+                   COALESCE(error, '') AS detail
+            FROM tool_calls
+            WHERE run_id = ?
+            UNION ALL
+            SELECT timestamp, 'action' AS source, reason_code AS label,
+                   CASE WHEN fallback_status IS NOT NULL
+                             AND LOWER(TRIM(fallback_status))
+                                 NOT IN ('', 'none', 'inactive', 'false')
+                        THEN 'fallback' ELSE 'applied' END AS status,
+                   applied_values_json AS detail
+            FROM applied_actions
+            WHERE run_id = ?
+            UNION ALL
+            SELECT last_seen_at AS timestamp, 'energyplus' AS source,
+                   severity AS label, 'message' AS status, message AS detail
+            FROM simulation_messages
+            WHERE run_id = ?
+        )
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (run_id, run_id, run_id, limit),
+        parse_dates=("timestamp",),
+    )
+
+
+def aligned_demand(
+    database_path: Path, baseline_run_id: str, controlled_run_id: str
+) -> pd.DataFrame:
+    """Align facility demand for visualization only, by simulated timestamp."""
+
+    baseline = telemetry(database_path, baseline_run_id)
+    controlled = telemetry(database_path, controlled_run_id)
+    required = {"simulation_timestamp", "facility_demand_kw"}
+    if not required.issubset(baseline) or not required.issubset(controlled):
+        return pd.DataFrame()
+    return baseline[list(required)].merge(
+        controlled[list(required)],
+        on="simulation_timestamp",
+        how="inner",
+        suffixes=("_baseline", "_controlled"),
+    )
+
+
+def run_artifacts(database_path: Path, run_id: str) -> pd.DataFrame:
+    """Return recorded run artifacts without reading any file content."""
+
+    with readonly_connection(database_path) as connection:
+        _require_real_run(connection, run_id)
+    return _read_frame(
+        database_path,
+        """
+        SELECT timestamp, artifact_type, path, sha256, size_bytes
+        FROM run_artifacts
+        WHERE run_id = ?
+        ORDER BY artifact_type, path
+        """,
+        (run_id,),
+        parse_dates=("timestamp",),
+    )
+
+
 def _read_frame(
     database_path: Path,
     query: str,
