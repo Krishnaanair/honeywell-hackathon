@@ -854,15 +854,17 @@ def render_text_pdf(
         elif line.startswith("# "):
             # The PDF already has a document title.
             continue
+        elif _is_publication_boundary_comment(line):
+            continue
         elif line.startswith("## "):
-            story.append(Paragraph(_escape_pdf_text(line[3:]), heading1))
+            story.append(Paragraph(_inline_markup(line[3:]), heading1))
         elif line.startswith("### "):
-            story.append(Paragraph(_escape_pdf_text(line[4:]), heading2))
+            story.append(Paragraph(_inline_markup(line[4:]), heading2))
         elif line.startswith("- "):
-            story.append(Paragraph(_escape_pdf_text(line[2:]), bullet, bulletText="-"))
+            story.append(Paragraph(_inline_markup(line[2:]), bullet, bulletText="-"))
         elif _ordered_item(line):
             number, text = line.split(".", 1)
-            story.append(Paragraph(_escape_pdf_text(text.strip()), bullet, bulletText=f"{number}."))
+            story.append(Paragraph(_inline_markup(text.strip()), bullet, bulletText=f"{number}."))
         else:
             story.append(Paragraph(_inline_markup(line), normal))
     if code_lines:
@@ -1383,15 +1385,81 @@ def _escape_pdf_text(text: str) -> str:
 
 
 def _inline_markup(text: str) -> str:
-    escaped = _escape_pdf_text(text)
-    while "**" in escaped:
-        escaped = escaped.replace("**", "<b>", 1)
-        if "**" in escaped:
-            escaped = escaped.replace("**", "</b>", 1)
-        else:
-            escaped = escaped.replace("<b>", "**", 1)
+    """Convert bounded Markdown inline spans into trusted ReportLab markup.
+
+    Only paired ``**bold**`` and backtick code spans are recognized. All source
+    text is escaped before the renderer-generated tags are inserted, so source
+    HTML is displayed literally rather than interpreted.
+    """
+
+    parts: list[str] = []
+    cursor = 0
+    while cursor < len(text):
+        bold_start = text.find("**", cursor)
+        code_start = text.find("`", cursor)
+        link_match = re.search(r"\[([^\]\n]+)]\(([^)\n]+)\)", text[cursor:])
+        link_start = cursor + link_match.start() if link_match is not None else -1
+        starts = [
+            (index, marker)
+            for index, marker in (
+                (bold_start, "**"),
+                (code_start, "`"),
+                (link_start, "link"),
+            )
+            if index >= 0
+        ]
+        if not starts:
+            parts.append(_escape_pdf_text(text[cursor:]))
             break
-    return escaped
+        start, marker = min(starts, key=lambda item: item[0])
+        parts.append(_escape_pdf_text(text[cursor:start]))
+        if marker == "link":
+            if link_match is None:
+                raise AssertionError("link start was recorded without a match")
+            label = link_match.group(1)
+            target = link_match.group(2).strip()
+            label_markup = _inline_markup(label)
+            if re.fullmatch(r"https?://[^\s<>]+", target, flags=re.IGNORECASE):
+                safe_target = _escape_pdf_attribute(target)
+                parts.append(f'<a href="{safe_target}" color="#176b45">{label_markup}</a>')
+            else:
+                parts.append(label_markup)
+            cursor += link_match.end()
+            continue
+        end = text.find(marker, start + len(marker))
+        if end < 0:
+            parts.append(_escape_pdf_text(text[start:]))
+            break
+        content = text[start + len(marker) : end]
+        if not content:
+            parts.append(_escape_pdf_text(marker))
+            cursor = start + len(marker)
+            continue
+        escaped_content = _escape_pdf_text(content)
+        if marker == "**":
+            parts.append(f"<b>{escaped_content}</b>")
+        else:
+            parts.append(f'<font name="Courier">{escaped_content}</font>')
+        cursor = end + len(marker)
+    return "".join(parts)
+
+
+def _escape_pdf_attribute(text: str) -> str:
+    """Escape a validated value before inserting it into renderer markup."""
+
+    return _escape_pdf_text(text).replace('"', "&quot;").replace("'", "&#39;")
+
+
+def _is_publication_boundary_comment(line: str) -> bool:
+    """Return whether a line is one of the controlled publication markers."""
+
+    return bool(
+        re.fullmatch(
+            r"<!--\s*(?:BEGIN|END)\s+VERIFIED_EVALUATION_BLOCK\s*-->",
+            line.strip(),
+            flags=re.IGNORECASE,
+        )
+    )
 
 
 def _ordered_item(line: str) -> bool:
@@ -1417,17 +1485,33 @@ def _flush_table(story: list[Any], lines: list[str], style: ParagraphStyle) -> N
     if not lines:
         return
     rows = [
-        [_escape_pdf_text(cell.strip()) for cell in line.strip("|").split("|")]
+        [cell.strip() for cell in line.strip("|").split("|")]
         for line in lines
         if set(line.replace("|", "").replace(":", "").replace("-", "").strip())
     ]
     lines.clear()
     if not rows:
         return
-    width = 174 * mm / max(len(rows[0]), 1)
+    column_widths = _table_column_widths(rows)
+    header_style = ParagraphStyle(
+        "EcoLoopTableHeader",
+        parent=style,
+        fontName="Helvetica-Bold",
+        textColor=colors.HexColor("#173c2b"),
+    )
+    rendered_rows = [
+        [
+            Paragraph(
+                _inline_markup(cell),
+                header_style if row_index == 0 else style,
+            )
+            for cell in row
+        ]
+        for row_index, row in enumerate(rows)
+    ]
     table = Table(
-        [[Paragraph(cell, style) for cell in row] for row in rows],
-        colWidths=[width] * len(rows[0]),
+        rendered_rows,
+        colWidths=column_widths,
         repeatRows=1,
     )
     table.setStyle(
@@ -1447,6 +1531,23 @@ def _flush_table(story: list[Any], lines: list[str], style: ParagraphStyle) -> N
     )
     story.append(KeepTogether(table))
     story.append(Spacer(1, 6))
+
+
+def _table_column_widths(rows: Sequence[Sequence[str]]) -> list[float]:
+    """Return stable widths for the bounded report table schemas."""
+
+    column_count = len(rows[0]) if rows else 0
+    if column_count == 0:
+        return []
+    headers = [re.sub(r"[*`]", "", cell).strip().casefold() for cell in rows[0]]
+    ratios: tuple[float, ...]
+    if column_count == 4 and headers[0] == "metric":
+        ratios = (0.36, 0.18, 0.18, 0.28)
+    elif column_count == 6 and headers[0] == "evidence run":
+        ratios = (0.24, 0.16, 0.16, 0.14, 0.15, 0.15)
+    else:
+        ratios = (1 / column_count,) * column_count
+    return [174 * mm * ratio for ratio in ratios]
 
 
 def _draw_page(canvas: Any, document: Any, title: str) -> None:

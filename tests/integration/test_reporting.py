@@ -17,6 +17,7 @@ from ecoloop.exceptions import RunStateError
 from ecoloop.reporting import (
     PackagingError,
     _clear_stale_submission_artifacts,
+    _table_column_widths,
     _write_source_zip,
     export_run,
     render_text_pdf,
@@ -70,6 +71,71 @@ def test_render_text_pdf_is_reopenable_and_contains_title(tmp_path):
     text = "\n".join(page.extract_text() or "" for page in reader.pages)
     assert "EcoLoop Verification Report" in text
     assert "No invented savings." in text
+
+
+def test_render_text_pdf_cleans_bounded_markdown_without_interpreting_html(tmp_path):
+    source = tmp_path / "report.md"
+    source.write_text(
+        "# Internal heading\n\n"
+        "## **Evidence**\n\n"
+        "<!-- BEGIN VERIFIED_EVALUATION_BLOCK -->\n"
+        "1. **Actuator proof** uses `safe-run-id`.\n"
+        "- Literal source HTML stays literal: <b>not trusted</b>.\n\n"
+        "See [`architecture.md`](docs/architecture.md) and "
+        "[official guidance](https://example.com/guide?mode=safe&v=1).\n\n"
+        "| Evidence run | Facility electricity | HVAC electricity | Peak demand | "
+        "API observations | Warnings / severe / fatal |\n"
+        "| --- | ---: | ---: | ---: | ---: | ---: |\n"
+        "| `real-baseline-smoke` | 217.912262 kWh | 89.437262 kWh | "
+        "22.273231 kW | 96 | 1 / 0 / 0 |\n"
+        "<!-- END VERIFIED_EVALUATION_BLOCK -->\n",
+        encoding="utf-8",
+    )
+
+    output = render_text_pdf(
+        source,
+        tmp_path / "report.pdf",
+        document_title="EcoLoop Markdown Cleanup",
+    )
+
+    text = "\n".join(page.extract_text() or "" for page in PdfReader(str(output)).pages)
+    assert "**" not in text
+    assert "`" not in text
+    assert "VERIFIED_EVALUATION_BLOCK" not in text
+    assert "Actuator proof uses safe-run-id." in " ".join(text.split())
+    assert "real-baseline-smoke" in text
+    assert "<b>not trusted</b>" in text
+    assert "architecture.md" in text
+    assert "official guidance" in text
+    assert "](docs/architecture.md)" not in text
+
+
+def test_report_table_gives_identifier_column_more_width():
+    rows = [
+        [
+            "Evidence run",
+            "Facility electricity",
+            "HVAC electricity",
+            "Peak demand",
+            "API observations",
+            "Warnings / severe / fatal",
+        ],
+        [
+            "`real-baseline-smoke`",
+            "217.912262 kWh",
+            "89.437262 kWh",
+            "22.273231 kW",
+            "96",
+            "1 / 0 / 0",
+        ],
+    ]
+
+    widths = _table_column_widths(rows)
+
+    assert len(widths) == 6
+    assert widths[0] > widths[4]
+    assert widths[4] > widths[3]
+    assert sum(widths) == pytest.approx(174 * 72 / 25.4)
 
 
 def test_export_run_marks_explicit_fake_and_writes_empty_valid_exports(tmp_path):
