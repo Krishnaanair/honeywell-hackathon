@@ -1,7 +1,7 @@
 # Final Test Report
 
 Date: 2026-07-26 (22:00–23:15 IST). Host: Windows 11 Pro 10.0.26200, Python
-3.11.9, EnergyPlus 26.1.0 (`C:\Users\krish\EnergyPlusV26-1-0`), Ollama with
+3.11.9, EnergyPlus 26.1.0 (via `ENERGYPLUS_HOME`), Ollama with
 `qwen3:8b` at `http://127.0.0.1:11434`. All commands ran from the repository
 root with `.venv\Scripts\python.exe` unless noted. Raw logs for this session
 are retained in the session scratchpad; durable evidence paths are listed per

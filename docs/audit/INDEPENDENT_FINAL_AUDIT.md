@@ -4,7 +4,7 @@ Role: hostile judge / independent QA. Date: 2026-07-26 (22:00–00:15 IST).
 Nothing below is taken from prior documentation claims; every number was
 produced by commands executed in this session or recomputed read-only from
 `runs/ecoloop.db`. Environment: Windows 11 Pro 10.0.26200, Python 3.11.9,
-EnergyPlus **26.1.0** (`ENERGYPLUS_HOME=C:\Users\krish\EnergyPlusV26-1-0`),
+EnergyPlus **26.1.0** (resolved via the configured `ENERGYPLUS_HOME`),
 OSS model **`qwen3:8b`** on local Ollama (loopback `127.0.0.1:11434`,
 100% GPU on an RTX 4060 Laptop GPU), MCP transport **stdio** (FastMCP server +
 official client session).
