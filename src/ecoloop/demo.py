@@ -22,6 +22,8 @@ from ecoloop.schemas import RunRecord, RunStatus, RunType
 
 _RUN_DISCOVERY_TIMEOUT_SECONDS = 60.0
 _PROCESS_POLL_SECONDS = 0.2
+_WINDOWS_CREATE_NEW_PROCESS_GROUP = int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+_WINDOWS_CTRL_BREAK_EVENT = getattr(signal, "CTRL_BREAK_EVENT", signal.SIGTERM)
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,7 +241,7 @@ def _start_dashboard(
             env=_child_environment(settings),
             stdout=subprocess.DEVNULL,
             stderr=subprocess.STDOUT,
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=_WINDOWS_CREATE_NEW_PROCESS_GROUP,
         )
     return subprocess.Popen(  # noqa: S603 - fixed local executable and arguments
         command,
@@ -273,7 +275,7 @@ def _start_agent_run(
             command,
             cwd=repository_root(),
             env=_child_environment(settings),
-            creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            creationflags=_WINDOWS_CREATE_NEW_PROCESS_GROUP,
         )
     return subprocess.Popen(  # noqa: S603 - fixed local executable and arguments
         command,
@@ -371,7 +373,7 @@ def _stop_process_tree(process: subprocess.Popen[bytes]) -> None:
             )
             return
         try:
-            process.send_signal(signal.CTRL_BREAK_EVENT)
+            process.send_signal(_WINDOWS_CTRL_BREAK_EVENT)
         except OSError:
             process.terminate()
     else:
