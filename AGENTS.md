@@ -95,6 +95,35 @@ pytest
 - Protocol tests must launch or connect through MCP transport, not call tool
   implementations directly as a substitute.
 
+## Data-mode definitions
+
+- **LIVE SIMULATION** means an active external PyEnergyPlus process is producing
+  current observations and accepting callback-bound approved actions.
+- **VERIFIED RUN REPLAY** means the UI is pacing immutable telemetry from a
+  completed real run. It is never described as active control.
+- **DEMO DATA** means an explicitly selected fake/test fixture. It is excluded
+  from production selectors, comparisons, reports, and submission KPIs.
+- **DISCONNECTED** means no valid live or completed real evidence source is
+  available. Missing values remain unavailable; they are never replaced by
+  zero or sample values.
+
+## Successful closed-loop definition
+
+A closed loop is successful only when one traceable real run contains:
+
+1. an active post-warmup EnergyPlus observation;
+2. a local open-weight model decision using current state;
+3. genuine MCP `tools/list` and `tools/call` traffic;
+4. a proposed numerical action linked to the observation and tool trace;
+5. independent deterministic validation or fallback;
+6. a valid schedule actuator write from an EnergyPlus callback;
+7. a subsequent EnergyPlus observation that reports the applied setpoint and
+   physical state; and
+8. a clean terminal status with official-output metrics and preserved logs.
+
+Code inspection, fake adapters, precomputed CSV files, or an unacknowledged
+actuator write do not satisfy this definition.
+
 ## Change checklist
 
 1. Preserve the safety and data-integrity invariants above.

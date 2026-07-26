@@ -30,6 +30,7 @@ from ecoloop.energyplus.runtime import (
     SimulationResult,
     run_simulation,
 )
+from ecoloop.evaluation import EvaluationError, load_verified_final_metrics
 from ecoloop.exceptions import RunStateError
 from ecoloop.mcp.sqlite_service import SQLiteMCPService
 from ecoloop.schemas import (
@@ -236,6 +237,7 @@ def run_case(
     settings: Settings | None = None,
     fake: bool = False,
     display_delay_seconds: float = 0.0,
+    baseline_run_id: str | None = None,
 ) -> dict[str, Any]:
     """Run one CLI-selected case and return a JSON-ready outcome.
 
@@ -262,6 +264,8 @@ def run_case(
         SimulationMode.AGENT,
     }:
         raise ValueError("run_case supports baseline, rule, and agent modes")
+    if simulation_mode is SimulationMode.BASELINE and baseline_run_id is not None:
+        raise ValueError("a baseline run cannot have a parent baseline_run_id")
     if not 0 <= display_delay_seconds <= 10:
         raise ValueError("display_delay_seconds must be in 0..10")
     file_config = load_file_config()
@@ -274,6 +278,9 @@ def run_case(
     runs_directory = runtime_settings.resolved_runs_dir()
     database_path.parent.mkdir(parents=True, exist_ok=True)
     runs_directory.mkdir(parents=True, exist_ok=True)
+    run_id = _new_run_id(simulation_mode)
+    run_directory = runs_directory / run_id
+    output_directory = run_directory / "energyplus"
     generated = repository_root() / "models" / "generated"
     weather_path = runtime_settings.resolved_weather_path()
     if fake:
@@ -287,6 +294,7 @@ def run_case(
         artifacts = prepare_models(
             runtime_settings,
             file_config.periods[period_name],
+            output_directory=run_directory / "prepared",
         )
         prepared_model = (
             artifacts.baseline_model
@@ -301,9 +309,6 @@ def run_case(
     )
     weather_sha256 = _sha256_file(weather_path) if weather_path.is_file() else None
 
-    run_id = _new_run_id(simulation_mode)
-    run_directory = runs_directory / run_id
-    output_directory = run_directory / "energyplus"
     if fake:
         model_path = prepared_model
         actuator_map = prepared_actuator_map
@@ -331,7 +336,9 @@ def run_case(
             period_name=period_name,
             weather_path=weather_path,
             preparation_fingerprint=preparation_fingerprint,
+            weather_sha256=weather_sha256,
             is_fake=fake,
+            requested_run_id=baseline_run_id,
         )
     )
     store.create_run(
@@ -352,6 +359,12 @@ def run_case(
             "preparation_manifest_sha256": preparation_fingerprint,
             "weather_sha256": weather_sha256,
             "input_model_sha256": (_sha256_file(model_path) if model_path.is_file() else None),
+            "period": {
+                "start_month": file_config.periods[period_name].start_month,
+                "start_day": file_config.periods[period_name].start_day,
+                "end_month": file_config.periods[period_name].end_month,
+                "end_day": file_config.periods[period_name].end_day,
+            },
             "display_delay_seconds": display_delay_seconds,
             "decision_interval_minutes": runtime_settings.decision_interval_minutes,
             "maximum_action_hold_minutes": runtime_settings.max_action_hold_minutes,
@@ -451,7 +464,9 @@ def replay_run(
     replay_artifacts = _run_async(lambda: service.generate_replay_model(source_run_id))
     replay_model = Path(str(replay_artifacts["replay_model"])).resolve()
     replay_schedule = Path(str(replay_artifacts["action_schedule"])).resolve()
-    actuator_map = repository_root() / "models" / "generated" / "actuator_map.csv"
+    if source.model_path is None:
+        raise ValueError("replay source has no immutable model snapshot")
+    actuator_map = Path(source.model_path).resolve().parent / "actuator_map.csv"
     weather_path = Path(source.weather_path).resolve()
     _require_real_run_assets(
         replay_model,
@@ -483,6 +498,8 @@ def replay_run(
                 source.metadata.get("preparation_fingerprint"),
             ),
             "weather_sha256": source.metadata.get("weather_sha256"),
+            "actuator_map_sha256": _sha256_file(actuator_map),
+            "replay_timing_source": replay_artifacts.get("timing_source"),
         },
     )
     result = run_simulation(
@@ -1046,36 +1063,65 @@ def _select_compatible_baseline(
     period_name: str,
     weather_path: Path,
     preparation_fingerprint: str | None,
+    weather_sha256: str | None,
     is_fake: bool,
+    requested_run_id: str | None = None,
 ) -> RunRecord | None:
-    """Select the newest completed baseline with matching physical inputs."""
+    """Select a verified baseline with exact immutable physical provenance."""
 
     expected_weather = str(weather_path.resolve())
     expected_version = "explicit-fake-plant" if is_fake else ENERGYPLUS_VERSION
-    for run in store.list_runs(
-        status=RunStatus.COMPLETED,
-        run_type=RunType.BASELINE,
-        include_fake=True,
-        limit=10_000,
-    ):
+    if preparation_fingerprint is None or weather_sha256 is None:
+        if requested_run_id is not None:
+            raise ValueError(
+                "cannot lock the requested baseline because current model or weather "
+                "provenance is missing"
+            )
+        return None
+    requested = store.get_run(requested_run_id) if requested_run_id is not None else None
+    if requested_run_id is not None and requested is None:
+        raise ValueError(f"requested baseline run does not exist: {requested_run_id}")
+    candidates = (
+        [requested]
+        if requested is not None
+        else store.list_runs(
+            status=RunStatus.COMPLETED,
+            run_type=RunType.BASELINE,
+            include_fake=True,
+            limit=10_000,
+        )
+    )
+    rejection_reason = "requested baseline is not compatible with the controlled run"
+    for run in candidates:
         if (
-            run.is_fake != is_fake
+            run.run_type is not RunType.BASELINE
+            or run.status is not RunStatus.COMPLETED
+            or run.is_fake != is_fake
             or run.period_name != period_name
             or run.weather_path != expected_weather
             or run.energyplus_version != expected_version
         ):
+            rejection_reason = "requested baseline type, status, period, path, or version differs"
             continue
         recorded_family = run.metadata.get(
             "preparation_fingerprint",
             run.metadata.get("preparation_manifest_sha256"),
         )
-        if (
-            preparation_fingerprint is not None
-            and recorded_family is not None
-            and recorded_family != preparation_fingerprint
-        ):
+        if recorded_family != preparation_fingerprint:
+            rejection_reason = "requested baseline model-preparation fingerprint differs"
             continue
+        if run.metadata.get("weather_sha256") != weather_sha256:
+            rejection_reason = "requested baseline weather-content checksum differs"
+            continue
+        if not is_fake:
+            try:
+                load_verified_final_metrics(store, run.run_id)
+            except EvaluationError:
+                rejection_reason = "requested baseline lacks verified canonical final metrics"
+                continue
         return run
+    if requested_run_id is not None:
+        raise ValueError(f"{rejection_reason}: {requested_run_id}")
     return None
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -66,6 +67,10 @@ def test_reusable_baseline_accepts_only_matching_verified_real_run(
         energyplus_version="26.1.0",
         weather_path=settings.resolved_weather_path(),
         period_name="demo",
+        metadata={
+            "preparation_fingerprint": "a" * 64,
+            "weather_sha256": hashlib.sha256(b"weather").hexdigest(),
+        },
     )
     store.set_run_status("baseline-verified", RunStatus.RUNNING)
     store.set_run_status("baseline-verified", RunStatus.COMPLETED)
@@ -118,6 +123,30 @@ def test_reusable_baseline_accepts_only_matching_verified_real_run(
 
     assert selected is not None
     assert selected.run_id == "baseline-verified"
+
+
+def test_reusable_baseline_rejects_changed_weather_at_same_path(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    store = SQLiteStore(settings.resolved_database_path())
+    store.create_run(
+        "baseline-stale-weather",
+        RunType.BASELINE,
+        is_fake=False,
+        energyplus_version="26.1.0",
+        weather_path=settings.resolved_weather_path(),
+        period_name="demo",
+        metadata={
+            "preparation_fingerprint": "a" * 64,
+            "weather_sha256": hashlib.sha256(b"weather").hexdigest(),
+        },
+    )
+    store.set_run_status("baseline-stale-weather", RunStatus.RUNNING)
+    store.set_run_status("baseline-stale-weather", RunStatus.COMPLETED)
+    settings.resolved_weather_path().write_text("changed weather", encoding="utf-8")
+
+    assert _find_reusable_baseline(store, settings, "demo") is None
 
 
 def test_demo_rejects_invalid_port() -> None:

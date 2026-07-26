@@ -53,3 +53,6 @@ weather/*.ddy
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# Local session handoff notes
+CLAUDE.md

@@ -1,27 +1,26 @@
-"""Streamlit dashboard reading only the durable run database."""
+"""Streamlit command-center dashboard reading only the durable run database."""
 
 from __future__ import annotations
 
 import json
 import os
 import time
+from collections.abc import Sequence
 from html import escape
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
-from ecoloop.config import get_settings, repository_root
+from ecoloop.config import get_settings
 from ecoloop.dashboard import queries
-from ecoloop.dashboard.queries import DashboardDataError
-from ecoloop.dashboard.styles import DASHBOARD_CSS
+from ecoloop.dashboard.queries import DashboardDataError, RunStatistics
 
 
 def main() -> None:
-    """Render the six-tab EcoLoop operational dashboard."""
+    """Render the EcoLoop dark operations command center."""
 
     st.set_page_config(
         page_title="EcoLoop Control Room",
@@ -38,53 +37,64 @@ def main() -> None:
         "true",
         "yes",
     }
+    if replay_enabled and not replay_run_id:
+        _disconnected_header("Replay mode is enabled without a source run.")
+        st.error(
+            "Replay mode requires ECOLOOP_DEMO_REPLAY_RUN_ID to identify a "
+            "completed, verified real controlled run."
+        )
+        return
 
     try:
         runs = queries.list_runs(database_path, include_fake=False)
     except DashboardDataError as exc:
+        _disconnected_header("The run database is unavailable.")
         st.info(str(exc))
         st.code("python -m ecoloop doctor\npython -m ecoloop run baseline --period smoke")
         return
     except Exception as exc:  # dashboard process boundary
+        _disconnected_header("The run database could not be read.")
         st.error(f"Could not query the run database: {exc}")
         return
 
     if runs.empty:
+        _disconnected_header("No completed or running real run exists yet.")
         st.info("No real runs exist. Fake test runs are intentionally hidden.")
         return
 
-    run_id = _select_run(runs, replay_run_id if replay_enabled else None)
+    run_id = _select_run(
+        runs,
+        replay_run_id if replay_enabled else None,
+        preferred=_read_current_run_id(settings.resolved_runs_dir()),
+    )
     run = queries.get_run(database_path, run_id)
     if run is None:
+        _disconnected_header("The selected run record is missing.")
         st.error(f"Run disappeared: {run_id}")
         return
+    verified = queries.verified_metrics(database_path, run_id)
+    verified_evidence = _has_verified_evidence(verified)
+    if replay_enabled and not (_is_completed_controlled_run(run) and verified_evidence):
+        _disconnected_header("The replay source failed the verification gate.")
+        st.error(
+            "Replay is restricted to a completed, verified real controlled run "
+            "with a passing official-energy cross-check."
+        )
+        return
 
-    _brand_header(run, replay_enabled=replay_enabled)
-    _run_context(run, replay_enabled=replay_enabled)
+    _sidebar_run_panel(run)
     frame_limit = _replay_controls(database_path, run_id) if replay_enabled else None
 
-    tabs = st.tabs(
-        [
-            "Live Operations",
-            "Baseline vs Agent",
-            "Comfort and IAQ",
-            "Agent Decisions",
-            "Reliability and Errors",
-            "Methodology",
-        ]
+    _command_center(
+        database_path,
+        run,
+        frame_limit,
+        replay_enabled=replay_enabled,
+        verified_evidence=verified_evidence,
     )
-    with tabs[0]:
-        _live_operations(database_path, run, frame_limit)
-    with tabs[1]:
-        _comparison(database_path, runs)
-    with tabs[2]:
-        _comfort(database_path, run_id, frame_limit)
-    with tabs[3]:
-        _decisions(database_path, run_id)
-    with tabs[4]:
-        _reliability(database_path, run_id)
-    with tabs[5]:
-        _methodology()
+    _performance_section(database_path, runs)
+    _comfort_section(database_path, run_id, frame_limit)
+    _pipeline_section(database_path, run_id)
 
     st.markdown(
         "<div class='ecoloop-footer'>"
@@ -104,40 +114,212 @@ def main() -> None:
         st.rerun()
 
 
-def _brand_header(run: dict[str, Any], *, replay_enabled: bool) -> None:
-    status = str(run.get("status") or "unknown").casefold()
+@st.fragment(run_every=3.0)
+def _command_center(
+    database_path: Path,
+    run: dict[str, Any],
+    limit: int | None,
+    *,
+    replay_enabled: bool,
+    verified_evidence: bool,
+) -> None:
+    """Render the live panels: header, simulation, zones, agent, MCP, console."""
+
+    refreshed_run = queries.get_run(database_path, str(run["run_id"]))
+    if refreshed_run is not None:
+        run = refreshed_run
+    run_id = str(run["run_id"])
+    run_type = str(run.get("run_type") or "").casefold()
+    run_stats = queries.run_statistics(database_path, run_id)
+    telemetry = queries.telemetry(database_path, run_id, limit=limit)
+    zones = queries.zone_telemetry(database_path, run_id)
+    if limit is not None and not telemetry.empty:
+        zones = zones[zones["simulation_timestamp"] <= telemetry["simulation_timestamp"].max()]
+    decisions = queries.recent_decisions(database_path, run_id, limit=8)
+    actions = queries.action_log(database_path, run_id, limit=12)
+    latest_apply = queries.latest_tool_call(
+        database_path,
+        run_id,
+        tool_name="apply_control_action",
+    )
+    console = queries.system_console_events(database_path, run_id, limit=30)
+    message_counts = queries.simulation_message_counts(database_path, run_id)
+
+    _command_header(
+        run,
+        run_stats,
+        telemetry,
+        decisions,
+        replay_enabled=replay_enabled,
+        verified_evidence=verified_evidence,
+        frame_limit=limit,
+    )
+    _telemetry_banner(
+        run_status=str(run.get("status") or "unknown"),
+        simulation_clock=_latest_simulated_text(run_stats, telemetry, limit),
+        recorded_at=telemetry.iloc[-1].get("timestamp") if not telemetry.empty else None,
+        row_count=len(telemetry) if limit is not None else run_stats["telemetry_steps"],
+        replay=limit is not None,
+    )
+    _simulation_panel(run, run_stats, message_counts)
+    _zone_panel(run, telemetry, zones)
+    agent_column, control_column = st.columns((1.0, 1.0), gap="large")
+    with agent_column:
+        _agent_panel(run, run_stats, decisions, run_type=run_type)
+    with control_column:
+        _control_panel(latest_apply, actions, run_type=run_type)
+    _console_panel(console)
+
+
+def _mode_badge(
+    status: str,
+    *,
+    replay_enabled: bool,
+    verified_evidence: bool,
+) -> tuple[str, str, str]:
+    """Map run state to the fail-closed data-mode badge (label, detail, class)."""
+
     if replay_enabled:
-        mode_label = "REAL RUN REPLAY"
-        mode_detail = "Recorded physical telemetry · visual playback only"
-        mode_class = "mode-replay"
-    elif status == "running":
-        mode_label = "LIVE SIMULATION"
-        mode_detail = "EnergyPlus telemetry · control loop active"
-        mode_class = "mode-live"
-    elif status == "completed":
-        mode_label = "COMPLETED EVIDENCE"
-        mode_detail = "Immutable run record · verified outputs"
-        mode_class = "mode-complete"
-    else:
-        mode_label = status.upper()
-        mode_detail = "Run record · inspect status below"
-        mode_class = "mode-neutral"
+        return (
+            "VERIFIED RUN REPLAY",
+            "Recorded physical telemetry · visual playback only · not active control",
+            "mode-replay",
+        )
+    if status == "running":
+        return (
+            "LIVE SIMULATION",
+            "EnergyPlus telemetry · control loop active",
+            "mode-live",
+        )
+    if status == "completed":
+        if verified_evidence:
+            return (
+                "EVIDENCE CONSOLE",
+                "Finalized audit record · official energy cross-check passed",
+                "mode-complete",
+            )
+        return (
+            "COMPLETED RUN",
+            "Final evidence verification unavailable or failed",
+            "mode-neutral",
+        )
+    return (status.upper(), "Run record · inspect status below", "mode-neutral")
+
+
+def _command_header(
+    run: dict[str, Any],
+    run_stats: RunStatistics,
+    telemetry: pd.DataFrame,
+    decisions: pd.DataFrame,
+    *,
+    replay_enabled: bool,
+    verified_evidence: bool,
+    frame_limit: int | None,
+) -> None:
+    status = str(run.get("status") or "unknown").casefold()
+    mode_label, mode_detail, mode_class = _mode_badge(
+        status,
+        replay_enabled=replay_enabled,
+        verified_evidence=verified_evidence,
+    )
+    simulated = _latest_simulated_text(run_stats, telemetry, frame_limit)
+    status_class = {
+        "completed": "status-completed",
+        "running": "status-running",
+        "failed": "status-failed",
+    }.get(status, "status-neutral")
+    model_name = _decision_model(decisions, run_stats)
+    tool_calls = int(run_stats["tool_call_count"])
+    action_total = int(run_stats["proposed_action_count"]) + int(run_stats["applied_action_count"])
+    chips = [
+        ("ENERGYPLUS", status.upper(), status != "failed"),
+        (
+            "MCP",
+            f"{tool_calls:,} tool calls" if tool_calls else "no tool calls",
+            tool_calls > 0,
+        ),
+        ("MODEL", model_name or "no decisions", model_name is not None),
+        (
+            "SAFETY",
+            (
+                f"validator · {int(run_stats['safety_clamp_count'])} clamps"
+                if action_total
+                else "no actions"
+            ),
+            action_total > 0,
+        ),
+    ]
+    chip_html = "".join(
+        (
+            f"<div class='cc-chip {'chip-on' if active else 'chip-off'}'>"
+            f"<span>{escape(label)}</span><strong>{escape(value)}</strong></div>"
+        )
+        for label, value, active in chips
+    )
     st.markdown(
         f"""
-        <section class="ecoloop-hero">
-          <div class="hero-copy">
-            <div class="ecoloop-eyebrow">BUILDING SUPERVISORY CONTROL</div>
+        <section class="cc-header">
+          <div class="cc-brand">
+            <span class="cc-eyebrow">BUILDING SUPERVISORY CONTROL</span>
             <h1>EcoLoop Control Room</h1>
-            <p>
-              Physical simulation, local decision-making and deterministic
-              guardrails in one audit-ready operations view.
-            </p>
           </div>
-          <div class="hero-mode {mode_class}">
+          <div class="cc-mode {mode_class}">
             <span class="mode-signal"></span>
             <div>
               <strong>{escape(mode_label)}</strong>
               <small>{escape(mode_detail)}</small>
+            </div>
+          </div>
+        </section>
+        <div class="cc-idbar">
+          <div class="cc-id cc-id-wide">
+            <span>RUN</span>
+            <code>{escape(str(run["run_id"]))}</code>
+          </div>
+          <div class="cc-id">
+            <span>TYPE · PERIOD</span>
+            <strong>{escape(str(run.get("run_type") or "unknown").upper())} ·
+            {escape(str(run.get("period_name") or "unspecified").upper())}</strong>
+          </div>
+          <div class="cc-id">
+            <span>STATUS</span>
+            <strong class="{status_class}">{escape(status.upper())}</strong>
+          </div>
+          <div class="cc-id">
+            <span>SIMULATED CLOCK</span>
+            <strong>{escape(simulated)}</strong>
+          </div>
+          <div class="cc-id">
+            <span>ENERGYPLUS</span>
+            <strong>{escape(str(run.get("energyplus_version") or "unknown"))}</strong>
+          </div>
+          <div class="cc-id">
+            <span>DATA ORIGIN</span>
+            <strong class="origin">REAL DATABASE RECORD</strong>
+          </div>
+        </div>
+        <div class="cc-chips">{chip_html}</div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _disconnected_header(reason: str) -> None:
+    """Render the DISCONNECTED data-mode header when no evidence is usable."""
+
+    st.markdown(
+        f"""
+        <section class="cc-header">
+          <div class="cc-brand">
+            <span class="cc-eyebrow">BUILDING SUPERVISORY CONTROL</span>
+            <h1>EcoLoop Control Room</h1>
+          </div>
+          <div class="cc-mode mode-neutral">
+            <span class="mode-signal"></span>
+            <div>
+              <strong>DISCONNECTED</strong>
+              <small>{escape(reason)} Missing values stay unavailable; nothing is
+              substituted.</small>
             </div>
           </div>
         </section>
@@ -146,48 +328,21 @@ def _brand_header(run: dict[str, Any], *, replay_enabled: bool) -> None:
     )
 
 
-def _run_context(run: dict[str, Any], *, replay_enabled: bool) -> None:
-    run_id = escape(str(run["run_id"]))
-    status = escape(str(run.get("status") or "unknown"))
-    run_type = escape(str(run.get("run_type") or "unknown"))
-    period = escape(str(run.get("period_name") or "unspecified"))
-    evidence_label = "Replay source" if replay_enabled else "Evidence source"
-    status_class = {
-        "completed": "status-completed",
-        "running": "status-running",
-        "failed": "status-failed",
-    }.get(status.casefold(), "status-neutral")
-    st.markdown(
-        f"""
-        <div class="ecoloop-run-strip">
-          <div class="run-primary">
-            <span class="run-label">{escape(evidence_label.upper())}</span>
-            <div class="run-title">
-              <strong>{run_type.upper()} · {period.upper()}</strong>
-              <code>{run_id}</code>
-            </div>
-          </div>
-          <div class="run-secondary">
-            <span class="data-origin">REAL DATABASE RECORD</span>
-            <span class="run-status {status_class}">{status.upper()}</span>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def _sidebar_run_panel(run: dict[str, Any]) -> None:
+    """Keep the existing sidebar run card, refresh button and version caption."""
+
+    status = str(run.get("status") or "unknown")
+    run_type = str(run.get("run_type") or "unknown")
+    period = str(run.get("period_name") or "unspecified")
     progress = float(run.get("progress_percent") or 0.0)
     if status.casefold() == "completed":
         progress = 100.0
-    st.progress(
-        min(max(progress, 0.0), 100.0) / 100.0,
-        text=f"Simulation lifecycle · {progress:.0f}%",
-    )
     st.sidebar.markdown(
         f"""
         <div class="sidebar-run-card">
-          <span>{run_type.upper()}</span>
-          <strong>{period.title()}</strong>
-          <small>{status.upper()} · {progress:.0f}%</small>
+          <span>{escape(run_type.upper())}</span>
+          <strong>{escape(period.title())}</strong>
+          <small>{escape(status.upper())} · {progress:.0f}%</small>
         </div>
         """,
         unsafe_allow_html=True,
@@ -196,7 +351,12 @@ def _run_context(run: dict[str, Any], *, replay_enabled: bool) -> None:
     st.sidebar.caption(f"EnergyPlus {escape(str(run.get('energyplus_version') or 'unknown'))}")
 
 
-def _select_run(runs: pd.DataFrame, forced: str | None) -> str:
+def _select_run(
+    runs: pd.DataFrame,
+    forced: str | None,
+    *,
+    preferred: str | None,
+) -> str:
     st.sidebar.markdown(
         """
         <div class="sidebar-brand">
@@ -224,8 +384,58 @@ def _select_run(runs: pd.DataFrame, forced: str | None) -> str:
     return st.sidebar.selectbox(
         "Current real run",
         choices,
+        index=_preferred_run_index(runs, preferred),
         format_func=lambda value: labels[value],
     )
+
+
+def _read_current_run_id(runs_directory: Path) -> str | None:
+    """Read the demo-selected run ID without trusting stale or empty content."""
+
+    try:
+        run_id = (runs_directory / "current_run.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return run_id or None
+
+
+def _preferred_run_index(runs: pd.DataFrame, preferred: str | None) -> int:
+    """Choose current evidence, then the latest completed controlled run."""
+
+    normalized = runs.reset_index(drop=True)
+    if preferred:
+        matching = normalized[
+            (normalized["run_id"].astype(str) == preferred)
+            & (normalized["is_fake"].fillna(1).astype(int) == 0)
+        ]
+        if not matching.empty:
+            return int(matching.index[0])
+
+    completed = normalized[normalized["status"].astype(str).str.casefold().eq("completed")]
+    for run_type in ("agent", "rule", "replay", "fixed_override", "baseline"):
+        matching = completed[completed["run_type"].astype(str).str.casefold().eq(run_type)]
+        if not matching.empty:
+            return int(matching.index[0])
+    return 0
+
+
+def _is_completed_controlled_run(run: dict[str, Any]) -> bool:
+    """Return whether a run is real, completed, and physically controlled."""
+
+    controlled_types = {"agent", "rule", "replay", "fixed_override"}
+    return (
+        not bool(run.get("is_fake"))
+        and str(run.get("status") or "").casefold() == "completed"
+        and str(run.get("run_type") or "").casefold() in controlled_types
+    )
+
+
+def _has_verified_evidence(metrics: dict[str, dict[str, Any]]) -> bool:
+    """Require both run finalization and the official energy cross-check."""
+
+    finalization = _structured_metric(metrics, "finalization_verification")
+    cross_check = _structured_metric(metrics, "energy_cross_check")
+    return finalization.get("verified_for_comparison") is True and cross_check.get("passed") is True
 
 
 def _replay_controls(database_path: Path, run_id: str) -> int | None:
@@ -243,290 +453,426 @@ def _replay_controls(database_path: Path, run_id: str) -> int | None:
     return min(cursor, total)
 
 
-@st.fragment(run_every=3.0)
-def _live_operations(database_path: Path, run: dict[str, Any], limit: int | None) -> None:
-    refreshed_run = queries.get_run(database_path, str(run["run_id"]))
-    if refreshed_run is not None:
-        run = refreshed_run
-    run_stats = queries.run_statistics(database_path, str(run["run_id"]))
-    _section_header(
-        "Live Operations",
-        eyebrow="PHYSICAL STATE",
+def _simulation_panel(
+    run: dict[str, Any],
+    run_stats: RunStatistics,
+    message_counts: dict[str, int],
+) -> None:
+    """Provenance, simulated window, diagnostics and exit status of the engine."""
+
+    _panel_header(
+        "EnergyPlus simulation",
+        eyebrow="PHYSICS ENGINE",
         description=(
-            "Latest persisted EnergyPlus telemetry, active setpoints and the "
-            "control path that produced them."
+            "Model provenance, simulated window and engine diagnostics recorded "
+            "for the selected run."
         ),
     )
-    telemetry = queries.telemetry(database_path, str(run["run_id"]), limit=limit)
-    zones = queries.zone_telemetry(database_path, str(run["run_id"]), limit=None)
-    if limit is not None and not telemetry.empty:
-        cutoff = telemetry["simulation_timestamp"].max()
-        zones = zones[zones["simulation_timestamp"] <= cutoff]
+    metadata = _run_metadata(run)
+    status = str(run.get("status") or "unknown")
+    model_name = Path(str(run.get("model_path") or "")).name or "unavailable"
+    weather_name = Path(str(run.get("weather_path") or "")).name or "unavailable"
+    error_summary = str(run.get("error_summary") or "")
+    if message_counts:
+        diagnostics_value = " · ".join(
+            f"{message_counts.get(severity, 0)} {severity}"
+            for severity in ("warning", "severe", "fatal")
+        )
+        diagnostics_note = "recorded engine messages"
+    else:
+        diagnostics_value = "no engine messages recorded"
+        diagnostics_note = ""
+    cross_check = run_stats["energy_cross_check_passed"]
+    finalized = run_stats["finalization_verified_for_comparison"]
+    verification_value = (
+        "cross-check PASS"
+        if cross_check is True
+        else "cross-check FAIL"
+        if cross_check is False
+        else "cross-check unavailable"
+    )
+    verification_note = (
+        "finalized for comparison"
+        if finalized is True
+        else "not finalized for comparison"
+        if finalized is False
+        else "finalization unavailable"
+    )
+    cells = [
+        ("MODEL (IDF)", model_name, _hash_text(metadata.get("input_model_sha256")), ""),
+        ("WEATHER (EPW)", weather_name, _hash_text(metadata.get("weather_sha256")), ""),
+        (
+            "PREPARATION",
+            "run-local manifest",
+            _hash_text(run_stats["preparation_fingerprint"]),
+            "",
+        ),
+        (
+            "PERIOD",
+            str(run.get("period_name") or "unspecified").title(),
+            _window_text(run_stats),
+            "",
+        ),
+        (
+            "DATA ORIGIN",
+            str(metadata.get("data_origin") or "not recorded"),
+            "",
+            "",
+        ),
+        ("EXIT STATUS", status.upper(), _truncate(error_summary, 90), ""),
+        ("DIAGNOSTICS", diagnostics_value, diagnostics_note, ""),
+        ("VERIFICATION", verification_value, verification_note, ""),
+    ]
+    cell_html = "".join(
+        (
+            "<div class='cc-cell'>"
+            f"<span>{escape(label)}</span>"
+            f"<strong{_title_attribute(title)}>{escape(value)}</strong>"
+            f"<small>{escape(note)}</small>"
+            "</div>"
+        )
+        for label, value, note, title in cells
+    )
+    st.markdown(f"<div class='cc-grid'>{cell_html}</div>", unsafe_allow_html=True)
+    progress = float(run.get("progress_percent") or 0.0)
+    if status.casefold() == "completed":
+        progress = 100.0
+    st.progress(
+        min(max(progress, 0.0), 100.0) / 100.0,
+        text=f"Simulation lifecycle · {progress:.0f}%",
+    )
+
+
+def _zone_panel(run: dict[str, Any], telemetry: pd.DataFrame, zones: pd.DataFrame) -> None:
+    """Latest per-zone physical state plus facility electrical summary."""
+
+    status = str(run.get("status") or "unknown").casefold()
+    if status == "running":
+        title = "Live zone state"
+        description = "Latest persisted EnergyPlus zone conditions from the active run."
+    else:
+        title = "Zone state · latest persisted frame"
+        description = "Final persisted EnergyPlus zone conditions; this run is not live."
+    _panel_header(title, eyebrow="PHYSICAL STATE", description=description)
+
     latest = telemetry.tail(1)
+    demand = latest.iloc[0].get("facility_demand_kw") if not latest.empty else None
+    cumulative = latest.iloc[0].get("cumulative_electricity_kwh") if not latest.empty else None
+    outdoor = latest.iloc[0].get("outdoor_temperature_c") if not latest.empty else None
     latest_zones = (
         zones[zones["simulation_timestamp"] == zones["simulation_timestamp"].max()]
         if not zones.empty
         else zones
     )
-    actions = queries.recent_actions(database_path, str(run["run_id"]), limit=25)
-    tools = queries.recent_tool_calls(database_path, str(run["run_id"]), limit=8)
-    decisions = queries.recent_decisions(database_path, str(run["run_id"]), limit=5)
-
-    simulation_clock = "Waiting for telemetry"
-    demand = None
-    heat_sp = None
-    cool_sp = None
-    cumulative_energy = None
-    outdoor = None
-    timestep_energy = None
-    recorded_at = None
-    if not latest.empty:
-        row = latest.iloc[0]
-        simulation_clock = _simulation_clock(row["simulation_timestamp"])
-        demand = row.get("facility_demand_kw")
-        heat_sp = row.get("heating_setpoint_c")
-        cool_sp = row.get("cooling_setpoint_c")
-        cumulative_energy = row.get("cumulative_electricity_kwh")
-        outdoor = row.get("outdoor_temperature_c")
-        timestep_energy = row.get("timestep_electricity_kwh")
-        recorded_at = row.get("timestamp")
     occupancy = latest_zones["occupant_count"].sum() if not latest_zones.empty else None
-    temp = latest_zones["operative_temperature_c"].mean() if not latest_zones.empty else None
-    temp_min = latest_zones["operative_temperature_c"].min() if not latest_zones.empty else None
-    temp_max = latest_zones["operative_temperature_c"].max() if not latest_zones.empty else None
-    pmv_abs = latest_zones["pmv"].abs().max() if not latest_zones.empty else None
-    latency = decisions.iloc[0].get("latency_ms") if not decisions.empty else None
-    applied_actions = (
-        actions[actions["applied"] == 1] if not actions.empty and "applied" in actions else actions
-    )
-    fallback = (
-        str(applied_actions.iloc[0].get("fallback_status") or "inactive")
-        if not applied_actions.empty
-        else "no action"
-    )
-    fallback_active = fallback.casefold() not in {"", "none", "inactive", "no action"}
 
-    _telemetry_banner(
-        run_status=str(run.get("status") or "unknown"),
-        simulation_clock=simulation_clock,
-        recorded_at=recorded_at,
-        row_count=len(telemetry) if limit is not None else run_stats["telemetry_steps"],
-        replay=limit is not None,
-    )
+    chips = st.columns(4)
+    chips[0].metric("Facility demand", _format_value(demand, " kW"))
+    chips[1].metric("Cumulative electricity", _format_value(cumulative, " kWh"))
+    chips[2].metric("Outdoor air", _format_value(outdoor, " °C"))
+    chips[3].metric("Occupancy", _format_value(occupancy, " people"))
 
-    columns = st.columns(4)
-    columns[0].metric("Simulation clock", simulation_clock)
-    columns[1].metric("Progress", _format_value(run.get("progress_percent"), "%"))
-    columns[2].metric("Facility demand", _format_value(demand, " kW"))
-    columns[3].metric("Cumulative electricity", _format_value(cumulative_energy, " kWh"))
-
-    status_cols = st.columns(4)
-    status_cols[0].metric(
-        "Mean operative temperature",
-        _format_value(temp, " °C"),
-        delta=_range_text(temp_min, temp_max, " °C"),
-        delta_color="off",
-    )
-    status_cols[1].metric("Outdoor air", _format_value(outdoor, " °C"))
-    status_cols[2].metric("Occupancy", _format_value(occupancy, " people"))
-    status_cols[3].metric("Latest timestep energy", _format_value(timestep_energy, " kWh"))
-
-    control_cols = st.columns(4)
-    control_cols[0].metric("Heating setpoint", _format_value(heat_sp, " °C"))
-    control_cols[1].metric("Cooling setpoint", _format_value(cool_sp, " °C"))
-    control_cols[2].metric("Maximum |PMV|", _format_value(pmv_abs))
-    control_cols[3].metric("Latest decision latency", _format_duration_ms(latency))
-
-    if fallback_active and str(run.get("status")).casefold() == "running":
-        st.warning(f"Deterministic fallback active · {fallback.replace('_', ' ').title()}")
-    elif fallback_active:
-        st.info(
-            "The final physically applied action used deterministic fallback · "
-            f"{fallback.replace('_', ' ').title()}."
+    if latest_zones.empty:
+        st.caption("No zone telemetry has been persisted for this run.")
+    else:
+        rows = [
+            [
+                str(row.zone_name),
+                _cell_number(row.operative_temperature_c, " °C"),
+                _cell_number(row.occupant_count, "", precision=1),
+                _cell_number(row.pmv, "", precision=2),
+                _cell_number(row.heating_setpoint_c, " °C", precision=1),
+                _cell_number(row.cooling_setpoint_c, " °C", precision=1),
+            ]
+            for row in latest_zones.itertuples()
+        ]
+        st.markdown(
+            _html_table(
+                ("Zone", "Operative", "People", "PMV", "Heat SP", "Cool SP"),
+                rows,
+            ),
+            unsafe_allow_html=True,
         )
-    elif str(run.get("status")).casefold() == "running":
-        st.success("Control loop healthy · live telemetry and audited actions are arriving.")
-    elif str(run.get("status")).casefold() == "failed":
-        st.error("This run failed. Savings and comparison results are intentionally suppressed.")
 
     if telemetry.empty:
         st.info("The run exists but has not produced facility telemetry.")
-    else:
-        chart_window = st.selectbox(
-            "Chart window",
-            ("Last 24 simulated hours", "Last 72 simulated hours", "Full run"),
-            index=0 if str(run.get("status")).casefold() == "running" else 2,
-            key=f"operations_window_{run['run_id']}",
-        )
-        chart_telemetry = _select_simulated_window(telemetry, chart_window)
-        chart_zones = zones[
-            zones["simulation_timestamp"].isin(chart_telemetry["simulation_timestamp"])
-        ]
-        live_frame = telemetry.copy()
-        live_frame = chart_telemetry.copy()
-        if not chart_zones.empty:
+        return
+    temperature_column, demand_column = st.columns(2, gap="large")
+    with temperature_column:
+        frame = telemetry.copy()
+        if not zones.empty:
             mean_zone = (
-                chart_zones.groupby("simulation_timestamp", as_index=False)[
-                    "operative_temperature_c"
-                ]
+                zones.groupby("simulation_timestamp", as_index=False)["operative_temperature_c"]
                 .mean()
                 .rename(columns={"operative_temperature_c": "mean_operative_temperature_c"})
             )
-            live_frame = live_frame.merge(
-                mean_zone,
-                on="simulation_timestamp",
-                how="left",
-            )
+            frame = frame.merge(mean_zone, on="simulation_timestamp", how="left")
         else:
-            live_frame["mean_operative_temperature_c"] = pd.NA
+            frame["mean_operative_temperature_c"] = pd.NA
         temperature_figure = go.Figure()
         for column, label, color, dash in (
-            ("mean_operative_temperature_c", "Mean operative", "#12b981", "solid"),
-            ("outdoor_temperature_c", "Outdoor", "#6b7f75", "dot"),
-            ("heating_setpoint_c", "Heating setpoint", "#e59b2f", "dash"),
-            ("cooling_setpoint_c", "Cooling setpoint", "#168aad", "dash"),
+            ("mean_operative_temperature_c", "Mean operative", "#34d399", "solid"),
+            ("outdoor_temperature_c", "Outdoor", "#77918a", "dot"),
+            ("heating_setpoint_c", "Heating setpoint", "#e0a33e", "dash"),
+            ("cooling_setpoint_c", "Cooling setpoint", "#38bdf8", "dash"),
         ):
-            if column in live_frame and live_frame[column].notna().any():
+            if column in frame and frame[column].notna().any():
                 temperature_figure.add_scatter(
-                    x=live_frame["simulation_timestamp"],
-                    y=live_frame[column],
+                    x=frame["simulation_timestamp"],
+                    y=frame[column],
                     name=label,
                     mode="lines",
-                    line={"color": color, "width": 2.4, "dash": dash},
+                    line={"color": color, "width": 2.2, "dash": dash},
                 )
         _style_chart(
             temperature_figure,
-            title="Temperature envelope",
+            title="Zone temperature and setpoints",
             yaxis_title="Temperature (°C)",
         )
+        st.plotly_chart(temperature_figure, width="stretch")
+    with demand_column:
         demand_figure = go.Figure()
         demand_figure.add_scatter(
-            x=chart_telemetry["simulation_timestamp"],
-            y=chart_telemetry["facility_demand_kw"],
+            x=telemetry["simulation_timestamp"],
+            y=telemetry["facility_demand_kw"],
             name="Demand",
             mode="lines",
             fill="tozeroy",
-            line={"color": "#0d766e", "width": 2.4},
-            fillcolor="rgba(13,118,110,0.14)",
+            line={"color": "#2dd4a7", "width": 2.2},
+            fillcolor="rgba(45,212,167,0.10)",
         )
         _style_chart(
             demand_figure,
-            title="Electrical demand",
+            title="Facility electrical demand",
             yaxis_title="Demand (kW)",
         )
-        st.plotly_chart(temperature_figure, width="stretch")
         st.plotly_chart(demand_figure, width="stretch")
 
-    if not latest_zones.empty:
-        st.markdown("#### Current zone snapshot")
-        zone_snapshot = latest_zones[
-            [
-                "zone_name",
-                "operative_temperature_c",
-                "relative_humidity_percent",
-                "occupant_count",
-                "pmv",
-                "ppd_percent",
-                "co2_ppm",
-            ]
-        ].rename(
-            columns={
-                "zone_name": "Zone",
-                "operative_temperature_c": "Operative °C",
-                "relative_humidity_percent": "RH %",
-                "occupant_count": "People",
-                "pmv": "PMV",
-                "ppd_percent": "PPD %",
-                "co2_ppm": "CO₂ ppm",
-            }
-        )
-        st.dataframe(
-            zone_snapshot,
-            hide_index=True,
-            width="stretch",
-            column_config={
-                "Operative °C": st.column_config.NumberColumn(format="%.2f"),
-                "RH %": st.column_config.NumberColumn(format="%.1f"),
-                "People": st.column_config.NumberColumn(format="%.1f"),
-                "PMV": st.column_config.NumberColumn(format="%.2f"),
-                "PPD %": st.column_config.NumberColumn(format="%.1f"),
-                "CO₂ ppm": st.column_config.NumberColumn(format="%.0f"),
-            },
-        )
 
-    _subsection_header(
-        "Control audit",
-        "The latest controller proposal, physically applied values and MCP calls.",
+def _agent_panel(
+    run: dict[str, Any],
+    run_stats: RunStatistics,
+    decisions: pd.DataFrame,
+    *,
+    run_type: str,
+) -> None:
+    """Latest local-model decisions, latency and stored agent configuration."""
+
+    model_name = _decision_model(decisions, run_stats)
+    title = f"AI agent ({model_name} · local)" if model_name else "AI agent"
+    _panel_header(
+        title,
+        eyebrow="DECISION LOOP",
+        description="Persisted local-model decisions with rationale and latency.",
     )
-    left, right = st.columns((0.9, 1.1), gap="large")
-    with left:
-        st.markdown("#### Latest control action")
-        if actions.empty:
-            st.caption("No action record yet.")
-        else:
-            proposed_action = actions.iloc[0]
-            st.markdown(
-                _action_card(
-                    title="Proposed by controller",
-                    values=proposed_action.get("proposed_values"),
-                    accent="proposed",
+    if run_type == "rule":
+        st.info(
+            "Deterministic rule-controller mode · bounded setpoint actions are "
+            "generated without model inference."
+        )
+    if decisions.empty:
+        if run_type not in {"rule"}:
+            st.caption("No model decisions are persisted for this run.")
+    else:
+        cards = st.columns(3)
+        cards[0].metric("Decisions", int(run_stats["decision_count"]))
+        cards[1].metric(
+            "Mean latency",
+            _format_duration_ms(run_stats["average_decision_latency_ms"]),
+        )
+        cards[2].metric(
+            "P95 latency",
+            _format_duration_ms(run_stats["p95_decision_latency_ms"]),
+        )
+        latest = decisions.iloc[0]
+        outcome = (
+            str(latest.get("fallback_status")).replace("_", " ").title()
+            if _is_active_fallback(latest.get("fallback_status"))
+            else "Validated action"
+        )
+        st.markdown(
+            f"""
+            <div class="decision-summary">
+              <span class="decision-kicker">LATEST DECISION · {escape(outcome.upper())}</span>
+              <strong>{
+                escape(str(latest.get("reason_code") or "unspecified").replace("_", " ").title())
+            }</strong>
+              <p>{
+                escape(str(latest.get("explanation") or "No operational explanation recorded."))
+            }</p>
+              <small>Observation {escape(str(latest.get("observation_id")))} ·
+              {escape(_format_duration_ms(latest.get("latency_ms")))}</small>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+        rows = [
+            [
+                _wall_time_text(row.timestamp),
+                str(row.reason_code or "—").replace("_", " "),
+                _format_duration_ms(row.latency_ms),
+                (
+                    str(row.fallback_status).replace("_", " ")
+                    if _is_active_fallback(row.fallback_status)
+                    else "—"
                 ),
-                unsafe_allow_html=True,
-            )
-            if int(proposed_action.get("applied") or 0) == 0:
-                st.caption("Latest proposal was not physically applied.")
-            if applied_actions.empty:
-                st.caption("No action has been physically applied.")
-            else:
-                applied_action = applied_actions.iloc[0]
+                _truncate(str(row.explanation or "—"), 90),
+            ]
+            for row in decisions.itertuples()
+        ]
+        st.markdown(
+            _html_table(
+                ("Time", "Reason", "Latency", "Fallback", "Explanation"),
+                rows,
+            ),
+            unsafe_allow_html=True,
+        )
+    configuration = _agent_configuration(run)
+    if configuration:
+        with st.expander("Agent configuration · run record", expanded=False):
+            for label, value in configuration:
                 st.markdown(
-                    _action_card(
-                        title="Latest physically applied action",
-                        values=applied_action.get("applied_values"),
-                        accent="applied",
-                    ),
+                    f"<div class='cc-config-row'><span>{escape(label)}</span>"
+                    f"<strong>{escape(value)}</strong></div>",
                     unsafe_allow_html=True,
                 )
-                reason = (
-                    str(applied_action.get("reason_code") or "unspecified")
-                    .replace("_", " ")
-                    .title()
-                )
-                explanation = (
-                    applied_action.get("explanation") or "No operational explanation recorded."
-                )
-                st.caption(f"{reason} · {explanation!s}")
-    with right:
-        st.markdown("#### Recent MCP tool trace")
-        if tools.empty:
-            st.caption("No MCP tool calls yet.")
+            st.caption(
+                "Only configuration persisted in the run record is shown; "
+                "model token budgets are not stored."
+            )
+
+
+def _control_panel(
+    latest_apply: dict[str, Any] | None,
+    actions: pd.DataFrame,
+    *,
+    run_type: str,
+) -> None:
+    """Latest apply_control_action MCP call and the recent action audit trail."""
+
+    _panel_header(
+        "Control actions (MCP)",
+        eyebrow="AUDITED ACTUATION",
+        description=(
+            "The most recent apply_control_action tool call and the persisted "
+            "proposed-versus-applied audit trail."
+        ),
+    )
+    if latest_apply is None:
+        if run_type == "rule":
+            st.caption("Rule-controller mode does not invoke model-facing MCP tools.")
         else:
-            tool_view = tools[
-                ["timestamp", "tool_name", "success", "duration_ms", "control_affecting"]
-            ].rename(
-                columns={
-                    "timestamp": "Timestamp",
-                    "tool_name": "Tool",
-                    "success": "OK",
-                    "duration_ms": "Latency ms",
-                    "control_affecting": "Control-affecting",
-                }
-            )
-            st.dataframe(
-                tool_view,
-                hide_index=True,
-                width="stretch",
-                column_config={
-                    "OK": st.column_config.CheckboxColumn(),
-                    "Control-affecting": st.column_config.CheckboxColumn(),
-                    "Latency ms": st.column_config.NumberColumn(format="%.1f"),
-                },
-            )
+            st.caption("No apply_control_action MCP call is persisted for this run.")
+    else:
+        state = "success" if int(latest_apply.get("success") or 0) == 1 else "failed"
+        duration = _format_duration_ms(latest_apply.get("duration_ms"))
+        called_at = _wall_time_text(latest_apply.get("timestamp"))
+        st.markdown(
+            f"<div class='cc-callmeta'><span>LATEST apply_control_action</span>"
+            f"<strong class='{'call-ok' if state == 'success' else 'call-error'}'>"
+            f"{escape(state)}</strong>"
+            f"<small>{escape(duration)} · {escape(called_at)}</small></div>",
+            unsafe_allow_html=True,
+        )
+        st.code(_pretty_json(latest_apply.get("arguments_json")), language="json")
+        error = latest_apply.get("error")
+        if error:
+            st.caption(f"Error: {error}")
+    if actions.empty:
+        st.caption("No control actions are persisted for this run.")
+        return
+    rows = []
+    for row in actions.itertuples():
+        applied = int(getattr(row, "applied", 0) or 0)
+        if applied == 0:
+            validation = "not applied"
+        elif _has_clamp(row.clamp_details):
+            validation = "clamped"
+        else:
+            validation = "valid"
+        rows.append(
+            [
+                _simulation_clock(row.simulation_timestamp),
+                _setpoint_text(row.proposed_values),
+                _setpoint_text(row.applied_values) if applied else "—",
+                validation,
+                (
+                    str(row.fallback_status).replace("_", " ")
+                    if _is_active_fallback(row.fallback_status)
+                    else "—"
+                ),
+                str(row.reason_code or "—").replace("_", " "),
+            ]
+        )
+    st.markdown(
+        _html_table(
+            ("Simulated time", "Proposed", "Applied", "Validation", "Fallback", "Reason"),
+            rows,
+        ),
+        unsafe_allow_html=True,
+    )
 
 
-def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
-    _section_header(
-        "Baseline vs Agent",
+def _console_panel(events: pd.DataFrame) -> None:
+    """Merged wall-clock log of persisted tool calls, actions and messages."""
+
+    _panel_header(
+        "System console",
+        eyebrow="MERGED EVENT LOG",
+        description=(
+            "Most recent persisted MCP tool calls, physically applied actions and "
+            "EnergyPlus messages, in wall-clock order."
+        ),
+    )
+    if events.empty:
+        st.caption("No events are persisted for this run.")
+        return
+    source_labels = {"mcp": "MCP", "action": "ACTUATE", "energyplus": "ENGINE"}
+    rows: list[str] = []
+    for row in events.itertuples():
+        source = str(row.source)
+        label = str(row.label or "")
+        status = str(row.status or "")
+        detail = str(row.detail or "")
+        if source == "action":
+            detail = _setpoint_text(detail)
+        if source == "energyplus":
+            status_class = {
+                "severe": "c-error",
+                "fatal": "c-error",
+                "warning": "c-warn",
+            }.get(label.casefold(), "c-dim")
+            status_text = label.casefold()
+        else:
+            status_class = {
+                "ok": "c-ok",
+                "applied": "c-ok",
+                "error": "c-error",
+                "fallback": "c-warn",
+            }.get(status.casefold(), "c-dim")
+            status_text = status
+        rows.append(
+            "<div class='console-row'>"
+            f"<span class='c-time'>{escape(_wall_time_text(row.timestamp))}</span>"
+            f"<span class='c-src src-{escape(source)}'>"
+            f"{escape(source_labels.get(source, source.upper()))}</span>"
+            f"<span class='c-label'>{escape(label if source != 'energyplus' else 'message')}"
+            "</span>"
+            f"<span class='c-status {status_class}'>{escape(status_text)}</span>"
+            f"<span class='c-detail'>{escape(_truncate(detail, 110))}</span>"
+            "</div>"
+        )
+    st.markdown(
+        f"<div class='console'>{''.join(rows)}</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def _performance_section(database_path: Path, runs: pd.DataFrame) -> None:
+    """Verified baseline comparison; fails closed for incompatible pairs."""
+
+    _panel_header(
+        "Performance vs baseline",
         eyebrow="MEASURED OUTCOMES",
         description=(
             "Official EnergyPlus totals from compatible completed real runs. "
@@ -584,13 +930,15 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
     if electricity_change is not None and electricity_change <= 0:
         _outcome_banner(
             tone="positive",
-            title=f"{abs(electricity_change):.2f}% lower facility electricity",
+            title=f"{electricity_change:+.2f}% facility electricity vs baseline",
             detail="Measured over the complete selected period; lower is better.",
         )
     elif electricity_change is not None:
         _outcome_banner(
             tone="caution",
-            title=f"{electricity_change:.2f}% higher facility electricity",
+            title=(
+                f"{electricity_change:+.2f}% facility electricity vs baseline — no energy saving"
+            ),
             detail=(
                 "The controlled case used more electricity. The dashboard reports "
                 "this measured result without adjustment."
@@ -649,13 +997,6 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
     for card, metric_name, label, suffix in (
         (impact_cards[0], "cost", "Operating cost", ""),
         (impact_cards[1], "operational_carbon_kg", "Operational carbon", " kg"),
-        (
-            impact_cards[2],
-            "occupied_temperature_violation_degree_hours",
-            "Violation degree-hours",
-            " °C·h",
-        ),
-        (impact_cards[3], "pmv_compliance_percent", "PMV compliance", "%"),
     ):
         base = _metric_value(baseline_metrics, metric_name)
         controlled_value = _metric_value(controlled_metrics, metric_name)
@@ -663,13 +1004,47 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
             label,
             _format_value(controlled_value, suffix),
             delta=_comparison_delta(base, controlled_value, suffix),
-            delta_color="inverse" if metric_name != "pmv_compliance_percent" else "normal",
+            delta_color="inverse",
         )
-
-    _subsection_header(
-        "Energy trajectory",
-        "Cumulative Runtime API telemetry aligned at identical simulated timestamps.",
+    impact_cards[2].metric(
+        "Fallback actions · controlled",
+        _format_count(_metric_value(controlled_metrics, "fallback_count")),
     )
+    impact_cards[3].metric(
+        "Safety clamps · controlled",
+        _format_count(_metric_value(controlled_metrics, "safety_clamp_count")),
+    )
+
+    _subpanel_header(
+        "Demand and energy trajectory",
+        "Runtime API telemetry aligned at identical simulated timestamps; official "
+        "totals are the cards above.",
+    )
+    demand_frame = queries.aligned_demand(database_path, str(baseline_id), str(controlled_id))
+    if demand_frame.empty:
+        st.caption("No aligned demand telemetry is available for this pair.")
+    else:
+        demand_figure = go.Figure()
+        demand_figure.add_scatter(
+            x=demand_frame["simulation_timestamp"],
+            y=demand_frame["facility_demand_kw_baseline"],
+            name="Baseline",
+            mode="lines",
+            line={"color": "#7f938c", "width": 1.8},
+        )
+        demand_figure.add_scatter(
+            x=demand_frame["simulation_timestamp"],
+            y=demand_frame["facility_demand_kw_controlled"],
+            name="Controlled",
+            mode="lines",
+            line={"color": "#2dd4a7", "width": 2.2},
+        )
+        _style_chart(
+            demand_figure,
+            title="Facility demand · aligned simulated time",
+            yaxis_title="Demand (kW)",
+        )
+        st.plotly_chart(demand_figure, width="stretch")
     aligned = queries.aligned_cumulative_energy(database_path, str(baseline_id), str(controlled_id))
     if not aligned.empty:
         figure = go.Figure()
@@ -677,16 +1052,15 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
             x=aligned["simulation_timestamp"],
             y=aligned["cumulative_electricity_kwh_baseline"],
             name="Baseline",
+            mode="lines",
+            line={"color": "#7f938c", "width": 1.8},
         )
         figure.add_scatter(
             x=aligned["simulation_timestamp"],
             y=aligned["cumulative_electricity_kwh_controlled"],
             name="Controlled",
-        )
-        figure.update_layout(
-            title="Cumulative telemetry cross-check (official totals shown above)",
-            xaxis_title="Simulated time",
-            yaxis_title="kWh",
+            mode="lines",
+            line={"color": "#38bdf8", "width": 2.2},
         )
         _style_chart(
             figure,
@@ -695,642 +1069,151 @@ def _comparison(database_path: Path, runs: pd.DataFrame) -> None:
         )
         st.plotly_chart(figure, width="stretch")
 
-    _subsection_header(
+    _subpanel_header(
         "Verified outcome scorecard",
         "Every row comes from metrics explicitly marked verified in the run database.",
     )
     scorecard = _comparison_scorecard(baseline_metrics, controlled_metrics)
-    st.dataframe(
-        scorecard,
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Baseline": st.column_config.NumberColumn(format="%.2f"),
-            "Controlled": st.column_config.NumberColumn(format="%.2f"),
-            "Absolute change": st.column_config.NumberColumn(format="%+.2f"),
-            "Relative change": st.column_config.NumberColumn(format="%+.2f%%"),
-        },
-    )
-
-
-def _comfort(database_path: Path, run_id: str, limit: int | None) -> None:
-    _section_header(
-        "Comfort and IAQ",
-        eyebrow="ZONE EVIDENCE",
-        description=(
-            "Thermal comfort and air-quality points reported by the EnergyPlus "
-            "physical model, without imputation."
-        ),
-    )
-    zones = queries.zone_telemetry(database_path, run_id)
-    if zones.empty:
-        st.info("No zone telemetry is available.")
-        return
-    if limit is not None:
-        facility = queries.telemetry(database_path, run_id, limit=limit)
-        if not facility.empty:
-            zones = zones[zones["simulation_timestamp"] <= facility["simulation_timestamp"].max()]
-    selected = st.multiselect(
-        "Zones",
-        sorted(zones["zone_name"].dropna().unique().tolist()),
-        default=sorted(zones["zone_name"].dropna().unique().tolist()),
-    )
-    zones = zones[zones["zone_name"].isin(selected)]
-    if zones.empty:
-        st.info("Select at least one zone to display comfort evidence.")
-        return
-    occupied = zones[zones["occupant_count"].fillna(0) > 0]
-    comfort_basis = occupied if not occupied.empty else zones.iloc[0:0]
-    occupied_operative = comfort_basis["operative_temperature_c"].dropna()
-    occupied_pmv = comfort_basis["pmv"].dropna()
-    occupied_compliance = (
-        float(occupied_operative.between(22.0, 26.0, inclusive="both").mean() * 100.0)
-        if not occupied_operative.empty
-        else None
-    )
-    pmv_compliance = (
-        float((occupied_pmv.abs() <= 0.7).mean() * 100.0) if not occupied_pmv.empty else None
-    )
-    comfort_cols = st.columns(4)
-    comfort_cols[0].metric("Selected zones", len(selected))
-    comfort_cols[1].metric(
-        "Occupied temperature compliance",
-        _format_value(occupied_compliance, "%"),
-    )
-    comfort_cols[2].metric("Occupied PMV compliance", _format_value(pmv_compliance, "%"))
-    comfort_cols[3].metric(
-        "Mean occupied PPD",
-        _format_value(
-            comfort_basis["ppd_percent"].mean() if not comfort_basis.empty else None,
-            "%",
-        ),
-    )
-
-    replay_end = (
-        zones["simulation_timestamp"].max() if limit is not None and not zones.empty else None
-    )
-    zone_summary = queries.comfort_distribution(
-        database_path,
-        run_id,
-        simulation_end=replay_end,
-    )
-    zone_summary = zone_summary[zone_summary["zone_name"].isin(selected)].rename(
-        columns={
-            "zone_name": "Zone",
-            "samples": "Samples",
-            "occupied_samples": "Occupied samples",
-            "operative_temperature_mean_c": "Mean operative °C",
-            "operative_temperature_p05_c": "P05 operative °C",
-            "operative_temperature_p95_c": "P95 operative °C",
-            "occupied_mean_ppd_percent": "Mean PPD %",
-            "occupied_pmv_max_abs": "Max |PMV|",
-            "relative_humidity_mean_percent": "Mean RH %",
-            "co2_max_ppm": "Max CO₂ ppm",
-        }
-    )
-    zone_summary = zone_summary[
-        [
-            "Zone",
-            "Samples",
-            "Occupied samples",
-            "Mean operative °C",
-            "P05 operative °C",
-            "P95 operative °C",
-            "Mean PPD %",
-            "Max |PMV|",
-            "Mean RH %",
-            "Max CO₂ ppm",
+    if scorecard.empty:
+        st.caption("No verified scorecard metrics exist for this pair.")
+    else:
+        rows = [
+            [
+                str(record["Metric"]),
+                str(record["Unit"]),
+                _cell_number(record["Baseline"], ""),
+                _cell_number(record["Controlled"], ""),
+                _cell_signed(record["Absolute change"]),
+                _cell_signed(record["Relative change"], "%"),
+                str(record["Preferred direction"]),
+            ]
+            for record in scorecard.to_dict("records")
         ]
-    ]
-    st.dataframe(
-        zone_summary,
-        hide_index=True,
-        width="stretch",
-        column_config={
-            "Mean operative °C": st.column_config.NumberColumn(format="%.2f"),
-            "P05 operative °C": st.column_config.NumberColumn(format="%.2f"),
-            "P95 operative °C": st.column_config.NumberColumn(format="%.2f"),
-            "Mean PPD %": st.column_config.NumberColumn(format="%.2f"),
-            "Max |PMV|": st.column_config.NumberColumn(format="%.2f"),
-            "Mean RH %": st.column_config.NumberColumn(format="%.1f"),
-            "Max CO₂ ppm": st.column_config.NumberColumn(format="%.0f"),
-        },
-    )
-
-    _subsection_header(
-        "Temperature distribution",
-        "The shaded band is the configured occupied operative-temperature target.",
-    )
-    distribution_figure = px.box(
-        zones,
-        x="zone_name",
-        y="operative_temperature_c",
-        color="zone_name",
-        points=False,
-        color_discrete_sequence=px.colors.qualitative.Safe,
-    )
-    distribution_figure.add_hrect(
-        y0=22,
-        y1=26,
-        fillcolor="rgba(17,167,125,0.10)",
-        line_width=0,
-    )
-    _style_chart(
-        distribution_figure,
-        title="Operative temperature distribution by zone",
-        yaxis_title="Temperature (°C)",
-        height=390,
-    )
-    distribution_figure.update_layout(showlegend=False)
-    st.plotly_chart(distribution_figure, width="stretch")
-
-    _subsection_header(
-        "Thermal trajectory",
-        "Zone traces remain aligned to their original simulated timestamps.",
-    )
-    temperature_figure = px.line(
-        zones,
-        x="simulation_timestamp",
-        y="operative_temperature_c",
-        color="zone_name",
-        color_discrete_sequence=px.colors.qualitative.Safe,
-    )
-    temperature_figure.add_hrect(
-        y0=22,
-        y1=26,
-        fillcolor="rgba(18,185,129,0.10)",
-        line_width=0,
-        annotation_text="Occupied target",
-        annotation_position="top left",
-    )
-    _style_chart(
-        temperature_figure,
-        title="Zone operative temperature",
-        yaxis_title="Temperature (°C)",
-    )
-    st.plotly_chart(temperature_figure, width="stretch")
-    if zones["pmv"].notna().any():
-        pmv_figure = px.line(
-            zones.dropna(subset=["pmv"]),
-            x="simulation_timestamp",
-            y="pmv",
-            color="zone_name",
-            color_discrete_sequence=px.colors.qualitative.Safe,
-        )
-        pmv_figure.add_hrect(
-            y0=-0.7,
-            y1=0.7,
-            fillcolor="rgba(18,185,129,0.10)",
-            line_width=0,
-        )
-        _style_chart(
-            pmv_figure,
-            title="Fanger PMV · target |PMV| ≤ 0.7",
-            yaxis_title="PMV",
-        )
-        st.plotly_chart(pmv_figure, width="stretch")
-    else:
-        st.caption("PMV is unavailable for this run.")
-    if zones["co2_ppm"].notna().any():
-        co2_figure = px.line(
-            zones.dropna(subset=["co2_ppm"]),
-            x="simulation_timestamp",
-            y="co2_ppm",
-            color="zone_name",
-            color_discrete_sequence=px.colors.qualitative.Safe,
-        )
-        co2_figure.add_hline(
-            y=1000,
-            line_dash="dash",
-            line_color="#d97706",
-            annotation_text="1000 ppm target",
-        )
-        _style_chart(
-            co2_figure,
-            title="Zone CO₂ concentration",
-            yaxis_title="CO₂ (ppm)",
-        )
-        st.plotly_chart(co2_figure, width="stretch")
-    else:
-        st.info(
-            "CO₂ is not available for this run because the source model does not expose "
-            "a verified contaminant-simulation point. The dashboard leaves it blank."
-        )
-
-
-def _decisions(database_path: Path, run_id: str) -> None:
-    _section_header(
-        "Agent Decisions",
-        eyebrow="CONTROL TRACE",
-        description=(
-            "Operational explanations, candidate evaluations and deterministic "
-            "validation from the audited tool loop."
-        ),
-    )
-    decisions = queries.recent_decisions(database_path, run_id, limit=10_000)
-    actions = queries.recent_actions(database_path, run_id, limit=10_000)
-    tools = queries.recent_tool_calls(database_path, run_id, limit=10_000)
-    if decisions.empty:
-        st.info("No decision records exist for this run.")
-    else:
-        applied_count = (
-            int(actions["applied"].fillna(0).sum())
-            if not actions.empty and "applied" in actions
-            else 0
-        )
-        tool_success = float(tools["success"].fillna(0).mean() * 100.0) if not tools.empty else None
-        decision_cards = st.columns(4)
-        decision_cards[0].metric("Decisions", len(decisions))
-        decision_cards[1].metric(
-            "Average latency",
-            _format_duration_ms(decisions["latency_ms"].mean()),
-        )
-        decision_cards[2].metric(
-            "P95 latency",
-            _format_duration_ms(decisions["latency_ms"].quantile(0.95)),
-        )
-        decision_cards[3].metric(
-            "Tool success",
-            _format_value(tool_success, "%"),
-        )
-        pathway_cards = st.columns(4)
-        pathway_cards[0].metric(
-            "Physically applied",
-            applied_count,
-            delta=_rate_text(applied_count, len(actions)),
-            delta_color="off",
-        )
-        pathway_cards[1].metric(
-            "Fallback decisions",
-            int(decisions["fallback_status"].map(_is_active_fallback).sum()),
-        )
-        pathway_cards[2].metric(
-            "Safety-modified actions",
-            int(actions["clamp_details"].map(_has_clamp).sum()) if not actions.empty else 0,
-        )
-        pathway_cards[3].metric(
-            "Cached actions",
-            int(actions["cache_hit"].fillna(0).sum())
-            if not actions.empty and "cache_hit" in actions
-            else 0,
-        )
-        latest = decisions.iloc[0]
-        outcome = (
-            str(latest.get("fallback_status")).replace("_", " ").title()
-            if _is_active_fallback(latest.get("fallback_status"))
-            else "Validated action"
-        )
-        latest_reason = escape(
-            str(latest.get("reason_code") or "unspecified").replace("_", " ").title()
-        )
-        latest_explanation = escape(
-            str(latest.get("explanation") or "No operational explanation recorded.")
-        )
-        latest_observation = escape(str(latest.get("observation_id")))
         st.markdown(
-            f"""
-            <div class="decision-summary">
-              <span class="decision-kicker">LATEST DECISION · {escape(outcome.upper())}</span>
-              <strong>{latest_reason}</strong>
-              <p>{latest_explanation}</p>
-              <small>Observation {latest_observation} ·
-              {_format_duration_ms(latest.get("latency_ms"))}</small>
-            </div>
-            """,
+            _html_table(
+                (
+                    "Metric",
+                    "Unit",
+                    "Baseline",
+                    "Controlled",
+                    "Absolute change",
+                    "Relative change",
+                    "Preferred",
+                ),
+                rows,
+            ),
             unsafe_allow_html=True,
         )
 
-        latency_figure = go.Figure()
-        ordered_decisions = decisions.sort_values("timestamp")
-        latency_figure.add_scatter(
-            x=ordered_decisions["timestamp"],
-            y=ordered_decisions["latency_ms"] / 1_000.0,
-            mode="lines+markers",
-            name="Decision latency",
-            line={"color": "#167d91", "width": 2.2},
-            marker={"size": 5},
-        )
-        _style_chart(
-            latency_figure,
-            title="Decision latency over the run",
-            yaxis_title="Latency (seconds)",
-        )
-        st.plotly_chart(latency_figure, width="stretch")
 
-        with st.expander("Decision history and candidate score components", expanded=False):
-            st.dataframe(
-                decisions.head(250)[
-                    [
-                        "timestamp",
-                        "observation_id",
-                        "state_summary",
-                        "candidate_scores",
-                        "reason_code",
-                        "explanation",
-                        "latency_ms",
-                        "fallback_status",
-                        "completed",
-                    ]
-                ],
-                hide_index=True,
-                width="stretch",
-            )
-    st.markdown("#### Proposed versus safety-applied actions")
-    if actions.empty:
-        st.caption("No actions exist for this run.")
-    else:
-        st.dataframe(
-            actions.head(250)[
-                [
-                    "timestamp",
-                    "observation_id",
-                    "proposed_values",
-                    "applied_values",
-                    "clamp_details",
-                    "validation_result",
-                    "reason_code",
-                    "explanation",
-                    "latency_ms",
-                ]
-            ],
-            hide_index=True,
-            width="stretch",
-        )
-    st.markdown("#### MCP tools called")
-    if tools.empty:
-        st.caption("No tool-call trace exists for this run.")
-    else:
-        tool_counts = (
-            tools.groupby("tool_name", as_index=False)
-            .agg(
-                calls=("tool_name", "size"),
-                success_rate=("success", "mean"),
-                mean_latency_ms=("duration_ms", "mean"),
-            )
-            .sort_values("calls", ascending=True)
-        )
-        tool_counts["success_rate"] = tool_counts["success_rate"] * 100.0
-        tool_figure = px.bar(
-            tool_counts,
-            x="calls",
-            y="tool_name",
+def _comfort_section(database_path: Path, run_id: str, limit: int | None) -> None:
+    """Occupied PMV compliance per zone from the persisted distribution query."""
+
+    _panel_header(
+        "Comfort distribution",
+        eyebrow="ZONE EVIDENCE",
+        description=(
+            "Occupied PMV compliance per zone from persisted samples against the "
+            "|PMV| ≤ 0.7 target."
+        ),
+    )
+    simulation_end = None
+    if limit is not None:
+        limited = queries.telemetry(database_path, run_id, limit=limit)
+        if not limited.empty:
+            simulation_end = limited["simulation_timestamp"].max()
+    distribution = queries.comfort_distribution(
+        database_path,
+        run_id,
+        simulation_end=simulation_end,
+    )
+    if distribution.empty:
+        st.caption("No zone telemetry is persisted; comfort distribution is unavailable.")
+        return
+    occupied = distribution[distribution["occupied_samples"] > 0]
+    if occupied.empty or occupied["occupied_pmv_compliance_percent"].isna().all():
+        st.caption("No occupied PMV samples are persisted; compliance distribution is unavailable.")
+        return
+    figure = go.Figure(
+        go.Bar(
+            x=occupied["occupied_pmv_compliance_percent"],
+            y=occupied["zone_name"],
             orientation="h",
-            color="mean_latency_ms",
-            color_continuous_scale=["#dff3ed", "#0d766e"],
-            hover_data={"success_rate": ":.1f", "mean_latency_ms": ":.1f"},
+            marker={"color": "#2dd4a7"},
+            customdata=occupied["occupied_samples"],
+            hovertemplate=(
+                "%{y}: %{x:.1f}% compliant · %{customdata} occupied samples<extra></extra>"
+            ),
         )
-        _style_chart(
-            tool_figure,
-            title="MCP tool usage",
-            yaxis_title="Tool",
-            height=max(340, min(560, 120 + 38 * len(tool_counts))),
+    )
+    figure.update_xaxes(range=[0, 100])
+    _style_chart(
+        figure,
+        title="Occupied PMV compliance by zone",
+        yaxis_title="Zone",
+        height=max(260, 140 + 44 * len(occupied)),
+    )
+    st.plotly_chart(figure, width="stretch")
+
+
+def _pipeline_section(database_path: Path, run_id: str) -> None:
+    """Closed-loop stage counts derived only from persisted records."""
+
+    run_stats = queries.run_statistics(database_path, run_id)
+    artifacts = queries.run_artifacts(database_path, run_id)
+    _panel_header(
+        "Closed-loop pipeline",
+        eyebrow="EVIDENCE TRAIL",
+        description=(
+            "Persisted record counts for each control-loop stage of the selected "
+            "run; a stage with no records reads none."
+        ),
+    )
+    evidence_count = int(run_stats["verified_metric_count"]) + len(artifacts)
+    steps = [
+        ("OBSERVE", int(run_stats["observation_count"]), "observations"),
+        ("DECIDE", int(run_stats["decision_count"]), "model decisions"),
+        ("MCP TOOLS", int(run_stats["tool_call_count"]), "tool calls"),
+        (
+            "VALIDATE",
+            int(run_stats["proposed_action_count"]),
+            f"proposals · {int(run_stats['safety_clamp_count'])} clamps",
+        ),
+        ("ACTUATE", int(run_stats["applied_action_count"]), "applied actions"),
+        (
+            "EVIDENCE",
+            evidence_count,
+            (
+                f"{int(run_stats['verified_metric_count'])} verified metrics · "
+                f"{len(artifacts)} artifacts"
+            ),
+        ),
+    ]
+    chip_html = "<div class='pipe-arrow'>→</div>".join(
+        (
+            f"<div class='pipe-step {'step-on' if count > 0 else 'step-off'}'>"
+            f"<span>{escape(label)}</span>"
+            f"<strong>{count:,}</strong>"
+            f"<small>{escape(note)}</small>"
+            f"<em>{'recorded' if count > 0 else 'none'}</em>"
+            "</div>"
         )
-        tool_figure.update_layout(coloraxis_colorbar_title="Mean ms")
-        st.plotly_chart(tool_figure, width="stretch")
-        with st.expander("Complete recent MCP trace", expanded=False):
+        for label, count, note in steps
+    )
+    st.markdown(f"<div class='pipeline'>{chip_html}</div>", unsafe_allow_html=True)
+    if not artifacts.empty:
+        with st.expander("Recorded run artifacts", expanded=False):
             st.dataframe(
-                tools.head(500)[
-                    [
-                        "timestamp",
-                        "sequence",
-                        "tool_name",
-                        "success",
-                        "duration_ms",
-                        "control_affecting",
-                        "error",
-                    ]
-                ],
+                artifacts,
                 hide_index=True,
                 width="stretch",
-                column_config={
-                    "success": st.column_config.CheckboxColumn(),
-                    "control_affecting": st.column_config.CheckboxColumn(),
-                    "duration_ms": st.column_config.NumberColumn(format="%.1f"),
-                },
             )
 
 
-def _reliability(database_path: Path, run_id: str) -> None:
-    _section_header(
-        "Reliability and Errors",
-        eyebrow="EVIDENCE HEALTH",
-        description=(
-            "Timeout recovery, safety intervention, protocol health and EnergyPlus "
-            "diagnostics kept in separate audit channels."
-        ),
-    )
-    tools = queries.recent_tool_calls(database_path, run_id, limit=10_000)
-    decisions = queries.recent_decisions(database_path, run_id, limit=10_000)
-    actions = queries.recent_actions(database_path, run_id, limit=10_000)
-    errors = queries.errors_and_messages(database_path, run_id, limit=500)
-    run_stats = queries.run_statistics(database_path, run_id)
-    applied_actions = (
-        actions[actions["applied"] == 1] if not actions.empty and "applied" in actions else actions
-    )
-    verified = queries.verified_metrics(database_path, run_id)
-    fallback_count = _verified_count(
-        verified,
-        "fallback_count",
-        int(applied_actions["fallback_status"].map(_is_active_fallback).sum())
-        if not applied_actions.empty
-        else 0,
-    )
-    clamp_count = _verified_count(
-        verified,
-        "safety_clamp_count",
-        int(applied_actions["clamp_details"].map(_has_clamp).sum())
-        if not applied_actions.empty
-        else 0,
-    )
-    timeout_count = _verified_count(
-        verified,
-        "timeout_count",
-        int(decisions["timeout_count"].fillna(0).sum()) if "timeout_count" in decisions else 0,
-    )
-    invalid_count = _verified_count(verified, "invalid_action_count", 0)
-    energyplus_diagnostics, controller_diagnostics = _diagnostic_groups(errors)
-    cross_check = _structured_metric(verified, "energy_cross_check")
-    finalization = _structured_metric(verified, "finalization_verification")
-    tool_success_rate = (
-        run_stats["successful_tool_call_count"] / run_stats["tool_call_count"] * 100.0
-        if run_stats["tool_call_count"]
-        else None
-    )
-    _integrity_banner(
-        run_verified=bool(finalization.get("verified_for_comparison")),
-        cross_check_passed=bool(cross_check.get("passed")),
-        run_id=run_id,
-    )
-    cards = st.columns(4)
-    cards[0].metric("Decisions", run_stats["decision_count"])
-    cards[1].metric("Tool calls", run_stats["tool_call_count"])
-    cards[2].metric(
-        "Tool success",
-        _format_value(tool_success_rate, "%"),
-    )
-    cards[3].metric(
-        "P95 decision latency",
-        _format_duration_ms(run_stats["p95_decision_latency_ms"]),
-    )
-    recovery_cards = st.columns(5)
-    recovery_cards[0].metric("Timeouts", timeout_count)
-    recovery_cards[1].metric("Fallbacks", fallback_count)
-    recovery_cards[2].metric("Invalid actions", invalid_count)
-    recovery_cards[3].metric("Safety clamps", clamp_count)
-    recovery_cards[4].metric(
-        "Failed tools",
-        int((tools["success"] == 0).sum()) if not tools.empty else 0,
-    )
-
-    evidence_cards = st.columns(4)
-    evidence_cards[0].metric(
-        "Physical application rate",
-        _format_value(run_stats["action_application_percent"], "%"),
-    )
-    evidence_cards[1].metric(
-        "Energy cross-check",
-        (
-            "PASS"
-            if cross_check.get("passed") is True
-            else "FAIL"
-            if cross_check.get("passed") is False
-            else "Unavailable"
-        ),
-    )
-    evidence_cards[2].metric(
-        "Cross-check difference",
-        _format_value(cross_check.get("difference_percent"), "%"),
-    )
-    evidence_cards[3].metric(
-        "Verified final metrics",
-        "YES" if finalization.get("verified_for_comparison") else "NO",
-    )
-
-    _subsection_header(
-        "Diagnostics",
-        "EnergyPlus engine messages and controller diagnostics are counted independently.",
-    )
-    if energyplus_diagnostics.empty:
-        st.success("No EnergyPlus warning, severe or fatal diagnostics are recorded.")
-    else:
-        severe_count = int(
-            energyplus_diagnostics["severity"].str.casefold().isin({"severe", "fatal"}).sum()
-        )
-        if severe_count:
-            st.error(
-                f"EnergyPlus recorded {severe_count} severe or fatal diagnostics; "
-                "comparison claims are suppressed for failed runs."
-            )
-        else:
-            st.warning(f"EnergyPlus recorded {len(energyplus_diagnostics)} warning diagnostics.")
-    if not controller_diagnostics.empty:
-        occurrences = int(
-            controller_diagnostics["occurrence_count"].fillna(1).sum()
-            if "occurrence_count" in controller_diagnostics
-            else len(controller_diagnostics)
-        )
-        st.warning(
-            f"{len(controller_diagnostics)} controller diagnostic records "
-            f"({occurrences} occurrences) are preserved separately from EnergyPlus "
-            "diagnostics and require review."
-        )
-    if not errors.empty:
-        severity_counts = (
-            errors.assign(
-                diagnostic_source=errors["source"].map(
-                    lambda value: (
-                        "EnergyPlus" if str(value) == "energyplus-message" else "Controller"
-                    )
-                )
-            )
-            .groupby(["diagnostic_source", "severity"])
-            .size()
-            .reset_index(name="count")
-        )
-        severity_figure = px.bar(
-            severity_counts,
-            x="severity",
-            y="count",
-            color="diagnostic_source",
-            barmode="group",
-            color_discrete_map={
-                "EnergyPlus": "#168aad",
-                "Controller": "#d97706",
-            },
-        )
-        _style_chart(
-            severity_figure,
-            title="Recorded diagnostics by source",
-            yaxis_title="Deduplicated records",
-        )
-        st.plotly_chart(severity_figure, width="stretch")
-        with st.expander("Diagnostic log records"):
-            st.dataframe(errors, hide_index=True, width="stretch")
-
-
-def _methodology() -> None:
-    _section_header(
-        "Methodology",
-        eyebrow="HOW TO READ THE EVIDENCE",
-        description=(
-            "The controls, compatibility gates and result sources behind every "
-            "number shown in this dashboard."
-        ),
-    )
-    cards = st.columns(4)
-    cards[0].metric("Zone timestep", "15 min")
-    cards[1].metric("Normal decision cadence", "60 min")
-    cards[2].metric("Maximum action hold", "120 min")
-    cards[3].metric("Inference", "Local only")
-    st.markdown(
-        """
-        <div class="method-grid">
-          <article>
-            <span>01</span>
-            <strong>Observe</strong>
-            <p>EnergyPlus callbacks persist facility and zone telemetry once per zone timestep.</p>
-          </article>
-          <article>
-            <span>02</span>
-            <strong>Decide</strong>
-            <p>The local model uses narrowly scoped MCP tools and bounded candidate actions.</p>
-          </article>
-          <article>
-            <span>03</span>
-            <strong>Validate</strong>
-            <p>A deterministic layer checks freshness, capability, deadband, rate and expiry.</p>
-          </article>
-          <article>
-            <span>04</span>
-            <strong>Verify</strong>
-            <p>
-              Official EnergyPlus totals are cross-checked against the persisted
-              telemetry trail.
-            </p>
-          </article>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    _outcome_banner(
-        tone="neutral",
-        title="Conservative publication gate",
-        detail=(
-            "Failed, incomplete, mismatched or test-fixture runs cannot produce a comparison claim."
-        ),
-    )
-    path = repository_root() / "docs" / "methodology.md"
-    if path.is_file():
-        with st.expander("Read the complete evaluation methodology", expanded=False):
-            st.markdown(path.read_text(encoding="utf-8"))
-    else:
-        st.info("Methodology document is unavailable.")
-
-
-def _section_header(title: str, *, eyebrow: str, description: str) -> None:
+def _panel_header(title: str, *, eyebrow: str, description: str) -> None:
     st.markdown(
         f"""
-        <div class="section-heading">
+        <div class="cc-panel-head">
           <span>{escape(eyebrow)}</span>
           <h2>{escape(title)}</h2>
           <p>{escape(description)}</p>
@@ -1340,10 +1223,10 @@ def _section_header(title: str, *, eyebrow: str, description: str) -> None:
     )
 
 
-def _subsection_header(title: str, description: str) -> None:
+def _subpanel_header(title: str, description: str) -> None:
     st.markdown(
         f"""
-        <div class="subsection-heading">
+        <div class="cc-subpanel-head">
           <h3>{escape(title)}</h3>
           <p>{escape(description)}</p>
         </div>
@@ -1362,7 +1245,7 @@ def _telemetry_banner(
 ) -> None:
     if replay:
         tone = "replay"
-        label = "REAL-RUN REPLAY"
+        label = "VERIFIED RUN REPLAY"
         detail = f"Showing persisted frame {row_count:,} · simulated {simulation_clock}"
     elif run_status.casefold() == "running":
         tone = "live"
@@ -1388,13 +1271,6 @@ def _telemetry_banner(
         """,
         unsafe_allow_html=True,
     )
-
-
-def _timestamp_text(value: Any) -> str:
-    if value is None or pd.isna(value):
-        return "time unavailable"
-    timestamp = pd.Timestamp(value)
-    return str(timestamp.strftime("%H:%M:%S UTC"))
 
 
 def _comparison_provenance(
@@ -1440,36 +1316,6 @@ def _outcome_banner(*, tone: str, title: str, detail: str) -> None:
         """,
         unsafe_allow_html=True,
     )
-
-
-def _integrity_banner(
-    *,
-    run_verified: bool,
-    cross_check_passed: bool,
-    run_id: str,
-) -> None:
-    passed = run_verified and cross_check_passed
-    tone = "positive" if passed else "caution"
-    title = "Publication checks passed" if passed else "Publication checks incomplete"
-    detail = (
-        "Final metrics are verified and official EnergyPlus electricity agrees with "
-        "the Runtime API telemetry cross-check."
-        if passed
-        else "One or more final verification gates are unavailable for this run."
-    )
-    _outcome_banner(
-        tone=tone,
-        title=title,
-        detail=f"{detail} Run {run_id}.",
-    )
-
-
-def _select_simulated_window(frame: pd.DataFrame, selection: str) -> pd.DataFrame:
-    if frame.empty or selection == "Full run":
-        return frame
-    hours = 24 if selection == "Last 24 simulated hours" else 72
-    latest = frame["simulation_timestamp"].max()
-    return frame[frame["simulation_timestamp"] >= latest - pd.Timedelta(hours=hours)]
 
 
 def _comparison_scorecard(
@@ -1524,33 +1370,172 @@ def _comparison_scorecard(
     return pd.DataFrame(rows)
 
 
-def _zone_summary(zones: pd.DataFrame) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    for zone_name, frame in zones.groupby("zone_name", sort=True):
-        occupied = frame["occupant_count"].fillna(0) > 0
-        rows.append(
-            {
-                "Zone": zone_name,
-                "Samples": len(frame),
-                "Occupied samples": int(occupied.sum()),
-                "Mean operative °C": frame["operative_temperature_c"].mean(),
-                "P05 operative °C": frame["operative_temperature_c"].quantile(0.05),
-                "P95 operative °C": frame["operative_temperature_c"].quantile(0.95),
-                "Mean PPD %": frame["ppd_percent"].mean(),
-                "Max |PMV|": frame["pmv"].abs().max(),
-                "Mean RH %": frame["relative_humidity_percent"].mean(),
-                "Max CO₂ ppm": frame["co2_ppm"].max(),
-            }
-        )
-    return pd.DataFrame(rows)
-
-
 def _structured_metric(
     metrics: dict[str, dict[str, Any]],
     metric_name: str,
 ) -> dict[str, Any]:
     value = metrics.get(metric_name, {}).get("structured_value")
     return value if isinstance(value, dict) else {}
+
+
+def _run_metadata(run: dict[str, Any]) -> dict[str, Any]:
+    raw = run.get("metadata_json")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(str(raw))
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _agent_configuration(run: dict[str, Any]) -> list[tuple[str, str]]:
+    """Read only the control configuration persisted in the run record."""
+
+    metadata = _run_metadata(run)
+    rows: list[tuple[str, str]] = []
+    for key, label, suffix in (
+        ("controller_mode", "Controller mode", ""),
+        ("decision_interval_minutes", "Decision interval", " min"),
+        ("maximum_action_hold_minutes", "Maximum action hold", " min"),
+        ("simulation_timeout_seconds", "Simulation timeout", " s"),
+        ("display_delay_seconds", "Display delay", " s"),
+        ("data_origin", "Data origin", ""),
+    ):
+        value = metadata.get(key)
+        if value is None:
+            continue
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            rows.append((label, f"{value:g}{suffix}"))
+        else:
+            rows.append((label, f"{value}{suffix}"))
+    return rows
+
+
+def _decision_model(decisions: pd.DataFrame, run_stats: RunStatistics) -> str | None:
+    if not decisions.empty and "model" in decisions:
+        models = decisions["model"].dropna()
+        if not models.empty:
+            return str(models.iloc[0])
+    return run_stats["latest_action_model"]
+
+
+def _latest_simulated_text(
+    run_stats: RunStatistics,
+    telemetry: pd.DataFrame,
+    limit: int | None,
+) -> str:
+    if limit is not None and not telemetry.empty:
+        return _simulation_clock(telemetry["simulation_timestamp"].max())
+    latest = run_stats["latest_simulation_timestamp"]
+    if latest is None:
+        return "No telemetry"
+    return _simulation_clock(pd.Timestamp(latest))
+
+
+def _window_text(run_stats: RunStatistics) -> str:
+    start = run_stats["telemetry_start"]
+    end = run_stats["telemetry_end"]
+    if start is None or end is None:
+        return "no telemetry window"
+    return f"{_simulation_clock(pd.Timestamp(start))} → {_simulation_clock(pd.Timestamp(end))}"
+
+
+def _hash_text(value: Any) -> str:
+    if not value:
+        return "hash unavailable"
+    text = str(value)
+    return f"sha256 {text[:12]}…" if len(text) > 12 else f"sha256 {text}"
+
+
+def _title_attribute(value: str) -> str:
+    return f' title="{escape(value)}"' if value else ""
+
+
+def _html_table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
+    """Build an escaped dark-theme table from preformatted cell text."""
+
+    head = "".join(f"<th>{escape(str(header))}</th>" for header in headers)
+    body = "".join(
+        "<tr>" + "".join(f"<td>{escape(str(cell))}</td>" for cell in row) + "</tr>" for row in rows
+    )
+    return (
+        '<div class="cc-tablewrap"><table class="cc-table">'
+        f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
+    )
+
+
+def _cell_number(value: Any, suffix: str, *, precision: int = 2) -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    if isinstance(value, (int, float)):
+        return f"{float(value):,.{precision}f}{suffix}"
+    return f"{value}{suffix}"
+
+
+def _cell_signed(value: Any, suffix: str = "") -> str:
+    if value is None or pd.isna(value):
+        return "—"
+    return f"{float(value):+,.2f}{suffix}"
+
+
+def _pretty_json(value: Any) -> str:
+    if value is None or value == "":
+        return "unavailable"
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError:
+        return str(value)
+    return json.dumps(parsed, ensure_ascii=True, indent=2, sort_keys=True)
+
+
+def _setpoint_text(value: Any) -> str:
+    """Format stored action values as plain text; callers escape for HTML."""
+
+    parsed: Any = value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return value or "unavailable"
+    if not isinstance(parsed, dict):
+        return str(parsed) if parsed else "unavailable"
+    labels = {
+        "heating_setpoint_c": ("Heat", "°C", 1),
+        "cooling_setpoint_c": ("Cool", "°C", 1),
+        "hold_minutes": ("Hold", "min", 0),
+        "hold_duration_minutes": ("Hold", "min", 0),
+    }
+    parts: list[str] = []
+    for key, (label, unit, precision) in labels.items():
+        item = parsed.get(key)
+        if isinstance(item, (int, float)) and not isinstance(item, bool):
+            parts.append(f"{label} {float(item):.{precision}f}{unit}")
+    if parts:
+        return " · ".join(parts)
+    extras = [
+        f"{key.replace('_', ' ')} {item}"
+        for key, item in parsed.items()
+        if item is not None and key != "candidate_id"
+    ]
+    return " · ".join(extras) if extras else "unavailable"
+
+
+def _truncate(text: str, limit: int = 110) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _wall_time_text(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "--:--:--"
+    return str(pd.Timestamp(value).strftime("%H:%M:%S"))
+
+
+def _timestamp_text(value: Any) -> str:
+    if value is None or pd.isna(value):
+        return "time unavailable"
+    timestamp = pd.Timestamp(value)
+    return str(timestamp.strftime("%H:%M:%S UTC"))
 
 
 def _simulation_clock(value: Any) -> str:
@@ -1565,61 +1550,33 @@ def _style_chart(
     *,
     title: str,
     yaxis_title: str,
-    height: int = 340,
+    height: int = 320,
 ) -> None:
     figure.update_layout(
-        title={"text": title, "font": {"size": 18, "color": "#173b32"}},
+        title={"text": title, "font": {"size": 15, "color": "#d5e4dd"}},
         yaxis_title=yaxis_title,
         xaxis_title=None,
-        template="plotly_white",
+        template="plotly_dark",
         height=height,
-        margin={"l": 24, "r": 18, "t": 76, "b": 24},
+        margin={"l": 24, "r": 18, "t": 64, "b": 24},
         paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="#ffffff",
-        font={"family": "Inter, Segoe UI, sans-serif", "color": "#35554b"},
+        plot_bgcolor="rgba(0,0,0,0)",
+        font={"family": "Inter, Segoe UI, sans-serif", "size": 12, "color": "#9db4ab"},
         hovermode="x unified",
         legend={
             "orientation": "h",
             "yanchor": "bottom",
-            "y": 1.08,
+            "y": 1.06,
             "xanchor": "left",
             "x": 0,
         },
     )
-    figure.update_xaxes(showgrid=False, linecolor="#dce8e2")
-    figure.update_yaxes(gridcolor="#edf3ef", zeroline=False, linecolor="#dce8e2")
-
-
-def _action_card(*, title: str, values: Any, accent: str) -> str:
-    return (
-        f"<div class='action-card action-{escape(accent)}'>"
-        f"<span>{escape(title.upper())}</span>"
-        f"<strong>{_action_values_text(values)}</strong>"
-        "</div>"
+    figure.update_xaxes(showgrid=False, linecolor="rgba(157,180,171,.25)", zeroline=False)
+    figure.update_yaxes(
+        gridcolor="rgba(157,180,171,.10)",
+        zeroline=False,
+        linecolor="rgba(157,180,171,.25)",
     )
-
-
-def _action_values_text(value: Any) -> str:
-    parsed: Any = value
-    if isinstance(value, str):
-        try:
-            parsed = json.loads(value)
-        except json.JSONDecodeError:
-            return escape(value or "Unavailable")
-    if not isinstance(parsed, dict):
-        return escape(str(parsed or "Unavailable"))
-    labels = {
-        "heating_setpoint_c": ("Heat", "°C"),
-        "cooling_setpoint_c": ("Cool", "°C"),
-        "hold_minutes": ("Hold", "min"),
-        "hold_duration_minutes": ("Hold", "min"),
-    }
-    parts: list[str] = []
-    for key, item in parsed.items():
-        label, unit = labels.get(key, (key.replace("_", " ").title(), ""))
-        formatted = f"{float(item):.1f}" if isinstance(item, (int, float)) else str(item)
-        parts.append(f"{label} {formatted}{unit}")
-    return escape(" · ".join(parts) if parts else "Unavailable")
 
 
 def _percent_change(baseline: float | None, controlled: float | None) -> float | None:
@@ -1643,24 +1600,6 @@ def _points_delta(baseline: float | None, controlled: float | None) -> str | Non
     if baseline is None or controlled is None:
         return None
     return f"{controlled - baseline:+,.2f} points"
-
-
-def _range_text(low: float | None, high: float | None, suffix: str) -> str | None:
-    if low is None or high is None or pd.isna(low) or pd.isna(high):
-        return None
-    return f"{low:,.1f}-{high:,.1f}{suffix} zone range"
-
-
-def _rate_text(numerator: int, denominator: int) -> str:
-    if denominator <= 0:
-        return "No proposals"
-    return f"{numerator / denominator * 100.0:.1f}% of proposals"
-
-
-def _signed_percent(value: float | None) -> str:
-    if value is None or pd.isna(value):
-        return "Unavailable"
-    return f"{value:+.2f}%"
 
 
 def _is_active_fallback(value: Any) -> bool:
@@ -1689,15 +1628,6 @@ def _metric_value(metrics: dict[str, dict[str, Any]], name: str) -> float | None
     return float(item["value"])
 
 
-def _verified_count(
-    metrics: dict[str, dict[str, Any]],
-    name: str,
-    fallback: int,
-) -> int:
-    value = _metric_value(metrics, name)
-    return fallback if value is None else int(value)
-
-
 def _format_duration_ms(value: Any) -> str:
     if value is None or pd.isna(value):
         return "Unavailable"
@@ -1705,6 +1635,12 @@ def _format_duration_ms(value: Any) -> str:
     if abs(milliseconds) >= 1_000:
         return f"{milliseconds / 1_000:,.2f} s"
     return f"{milliseconds:,.2f} ms"
+
+
+def _format_count(value: float | None) -> str:
+    if value is None or pd.isna(value):
+        return "Unavailable"
+    return f"{int(value):,}"
 
 
 def _preferred_controlled_index(controlled: pd.DataFrame) -> int:
@@ -1724,17 +1660,6 @@ def _preferred_controlled_index(controlled: pd.DataFrame) -> int:
     return min(ranked)[2] if ranked else 0
 
 
-def _diagnostic_groups(errors: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    if errors.empty:
-        return errors.copy(), errors.copy()
-    actionable = errors[
-        errors["severity"].astype(str).str.casefold().isin({"warning", "severe", "fatal"})
-    ]
-    energyplus = actionable[actionable["source"] == "energyplus-message"]
-    controller = actionable[actionable["source"] != "energyplus-message"]
-    return energyplus, controller
-
-
 def _format_value(value: Any, suffix: str = "") -> str:
     if value is None or pd.isna(value):
         return "Unavailable"
@@ -1743,296 +1668,606 @@ def _format_value(value: Any, suffix: str = "") -> str:
     return f"{value}{suffix}"
 
 
-def _delta_text(baseline: float | None, controlled: float | None) -> str | None:
-    if baseline is None or controlled is None:
-        return None
-    return f"{controlled - baseline:+,.2f} vs baseline"
-
-
-def _pmv_co2(pmv: Any, co2: Any) -> str:
-    pmv_text = _format_value(pmv)
-    co2_text = _format_value(co2, " ppm")
-    return f"{pmv_text} / {co2_text}"
-
-
 def _apply_style() -> None:
     st.markdown(
         """
         <style>
         :root {
-            --eco-ink: #12362d;
-            --eco-muted: #5e766e;
-            --eco-green: #0d766e;
-            --eco-lime: #a3e635;
-            --eco-line: #dce8e2;
-            --eco-canvas: #f3f7f4;
+            --cc-bg: #0a100e;
+            --cc-panel: #101815;
+            --cc-panel-2: #0d1412;
+            --cc-line: #1e2b26;
+            --cc-line-2: #2a3a33;
+            --cc-ink: #e5f0ea;
+            --cc-dim: #8ba49a;
+            --cc-faint: #5d736b;
+            --cc-teal: #2dd4a7;
+            --cc-cyan: #38bdf8;
+            --cc-amber: #e0a33e;
+            --cc-red: #e2685f;
+            --cc-mono: ui-monospace, SFMono-Regular, Consolas, "Cascadia Mono", monospace;
         }
         [data-testid="stAppViewContainer"] {
             background:
-                radial-gradient(circle at 88% 4%, rgba(163, 230, 53, .11), transparent 25rem),
-                linear-gradient(180deg, #f7faf8 0%, var(--eco-canvas) 100%);
+                radial-gradient(circle at 85% -8%, rgba(45, 212, 167, .07), transparent 30rem),
+                linear-gradient(180deg, #0c1210 0%, var(--cc-bg) 100%);
+            color: var(--cc-ink);
         }
-        [data-testid="stSidebar"] {
-            background: rgba(255, 255, 255, .96);
-            border-right: 1px solid var(--eco-line);
-        }
-        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p {
-            color: var(--eco-muted);
-        }
+        [data-testid="stHeader"] { background: transparent; }
         .block-container {
-            max-width: 1500px;
-            padding-top: 1.5rem;
-            padding-bottom: 2.5rem;
+            max-width: 1560px;
+            padding-top: 1.1rem;
+            padding-bottom: 2.6rem;
         }
-        .ecoloop-hero {
-            position: relative;
-            overflow: hidden;
-            padding: 2rem 2.25rem 1.8rem;
-            margin-bottom: 1rem;
-            border: 1px solid rgba(255, 255, 255, .12);
-            border-radius: 24px;
-            background:
-                radial-gradient(circle at 88% 20%, rgba(163, 230, 53, .26), transparent 20rem),
-                linear-gradient(120deg, #0c3028 0%, #0d5b52 58%, #0a756a 100%);
-            box-shadow: 0 24px 70px rgba(10, 56, 47, .18);
+        h1, h2, h3, h4 { color: var(--cc-ink); }
+        [data-testid="stMarkdownContainer"] { color: var(--cc-ink); }
+        [data-testid="stCaptionContainer"],
+        [data-testid="stCaptionContainer"] p { color: var(--cc-faint); }
+        [data-testid="stWidgetLabel"] p { color: var(--cc-dim); }
+
+        [data-testid="stSidebar"] {
+            background: #0c1311;
+            border-right: 1px solid var(--cc-line);
         }
-        .ecoloop-hero::after {
-            content: "";
-            position: absolute;
-            right: -3rem;
-            bottom: -8rem;
-            width: 22rem;
-            height: 22rem;
-            border: 1px solid rgba(255, 255, 255, .15);
-            border-radius: 50%;
-            box-shadow:
-                0 0 0 3rem rgba(255, 255, 255, .035),
-                0 0 0 6rem rgba(255, 255, 255, .025);
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] p,
+        [data-testid="stSidebar"] [data-testid="stMarkdownContainer"] h4 {
+            color: var(--cc-dim);
         }
-        .ecoloop-eyebrow {
-            position: relative;
-            z-index: 1;
-            color: #c6f68d;
-            font-size: .74rem;
-            font-weight: 800;
-            letter-spacing: .16em;
-        }
-        .ecoloop-hero h1 {
-            position: relative;
-            z-index: 1;
-            margin: .42rem 0 .32rem;
-            color: #ffffff !important;
-            font-size: clamp(2.1rem, 4vw, 3.45rem);
-            line-height: 1.03;
-            letter-spacing: -.045em;
-        }
-        .ecoloop-hero p {
-            position: relative;
-            z-index: 1;
-            max-width: 760px;
-            margin: 0;
-            color: #d9eee7;
-            font-size: 1.05rem;
-        }
-        .ecoloop-hero-tags {
-            position: relative;
-            z-index: 1;
-            display: flex;
-            flex-wrap: wrap;
-            gap: .55rem;
-            margin-top: 1.25rem;
-        }
-        .ecoloop-hero-tags span {
-            padding: .32rem .62rem;
-            color: #e7f7f1;
-            border: 1px solid rgba(255, 255, 255, .22);
-            border-radius: 999px;
-            background: rgba(255, 255, 255, .08);
-            font-size: .67rem;
-            font-weight: 750;
-            letter-spacing: .07em;
-        }
-        .ecoloop-run-strip {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 1rem;
-            margin: .55rem 0 .7rem;
-            padding: .9rem 1.05rem;
-            border: 1px solid var(--eco-line);
-            border-radius: 16px;
-            background: rgba(255, 255, 255, .86);
-            box-shadow: 0 8px 30px rgba(29, 71, 59, .06);
-        }
-        .ecoloop-run-strip > div {
-            display: flex;
-            align-items: center;
-            gap: .8rem;
-            min-width: 0;
-        }
-        .ecoloop-run-strip code {
-            overflow: hidden;
-            color: var(--eco-muted);
-            text-overflow: ellipsis;
-            white-space: nowrap;
-            background: transparent;
-        }
-        .run-label {
-            color: var(--eco-muted);
-            font-size: .66rem;
-            font-weight: 800;
-            letter-spacing: .1em;
-        }
-        .run-status {
-            flex: 0 0 auto;
-            padding: .35rem .65rem;
-            border-radius: 999px;
-            font-size: .69rem;
+        .sidebar-brand { display: grid; gap: .08rem; padding: .3rem 0 .8rem; }
+        .sidebar-brand span {
+            color: var(--cc-teal);
+            font-size: .68rem;
             font-weight: 850;
-            letter-spacing: .08em;
+            letter-spacing: .17em;
         }
-        .status-completed { color: #0b6b43; background: #dff8e9; }
-        .status-running { color: #0b6280; background: #dff4fb; }
-        .status-failed { color: #991b1b; background: #fee2e2; }
-        .status-neutral { color: #4b5563; background: #e5e7eb; }
-        [data-testid="stMetric"] {
-            min-height: 112px;
-            padding: .95rem 1rem;
-            border: 1px solid var(--eco-line);
-            border-radius: 16px;
-            background: rgba(255, 255, 255, .94);
-            box-shadow: 0 8px 24px rgba(29, 71, 59, .055);
-        }
-        [data-testid="stMetricLabel"] {
-            color: var(--eco-muted);
-            font-weight: 650;
-        }
-        [data-testid="stMetricValue"] {
-            color: var(--eco-ink);
-            font-weight: 780;
-            letter-spacing: -.025em;
-        }
-        [data-testid="stTabs"] [role="tablist"] {
-            gap: .35rem;
-            padding: .3rem;
-            border: 1px solid var(--eco-line);
-            border-radius: 14px;
-            background: rgba(255, 255, 255, .86);
-        }
-        [data-testid="stTabs"] [role="tab"] {
-            height: 2.6rem;
-            padding: 0 .85rem;
-            border-radius: 10px;
-        }
-        [data-testid="stTabs"] [role="tab"][aria-selected="true"] {
-            color: #ffffff !important;
-            background: var(--eco-green) !important;
-        }
-        [data-testid="stTabs"] [role="tab"][aria-selected="true"] p {
-            color: #ffffff !important;
-        }
-        [data-testid="stTabs"] .react-aria-SelectionIndicator {
-            display: none;
-        }
-        [data-testid="stSidebar"] .stButton > button {
-            color: #ffffff !important;
-            border-color: var(--eco-green) !important;
-            background: var(--eco-green) !important;
-        }
-        [data-testid="stSidebar"] .stButton > button p {
-            color: #ffffff !important;
-        }
-        [data-baseweb="tag"] {
-            background-color: var(--eco-green) !important;
-        }
-        [data-testid="stDataFrame"] {
-            overflow: hidden;
-            border: 1px solid var(--eco-line);
-            border-radius: 14px;
-            background: #ffffff;
-        }
-        .action-card {
-            margin-bottom: .65rem;
-            padding: .85rem 1rem;
-            border: 1px solid var(--eco-line);
-            border-left-width: 5px;
-            border-radius: 12px;
-            background: #ffffff;
-        }
-        .action-card span,
-        .decision-kicker {
-            display: block;
-            margin-bottom: .25rem;
-            color: var(--eco-muted);
-            font-size: .66rem;
-            font-weight: 800;
-            letter-spacing: .09em;
-        }
-        .action-card strong {
-            color: var(--eco-ink);
-            font-size: 1rem;
-        }
-        .action-proposed { border-left-color: #168aad; }
-        .action-applied { border-left-color: #12b981; }
-        .decision-summary {
-            margin: .85rem 0 1rem;
-            padding: 1.05rem 1.2rem;
-            border: 1px solid #cfe9de;
-            border-radius: 16px;
-            background: linear-gradient(135deg, #f4fcf8, #ffffff);
-        }
-        .decision-summary strong {
-            display: block;
-            color: var(--eco-ink);
-            font-size: 1.2rem;
-        }
-        .decision-summary p {
-            margin: .35rem 0;
-            color: #365b50;
-        }
-        .decision-summary small { color: var(--eco-muted); }
+        .sidebar-brand strong { color: var(--cc-ink); font-size: 1.16rem; }
         .sidebar-run-card {
             display: grid;
             gap: .18rem;
             margin: .6rem 0 1rem;
             padding: .85rem;
-            border: 1px solid var(--eco-line);
-            border-radius: 14px;
-            background: linear-gradient(145deg, #f8fcfa, #edf7f2);
+            border: 1px solid var(--cc-line-2);
+            border-radius: 12px;
+            background: var(--cc-panel);
         }
         .sidebar-run-card span,
         .sidebar-run-card small {
-            color: var(--eco-muted);
+            color: var(--cc-dim);
             font-size: .7rem;
             letter-spacing: .05em;
         }
-        .sidebar-run-card strong { color: var(--eco-ink); }
-        .ecoloop-footer {
-            margin-top: 2.5rem;
-            padding-top: 1rem;
-            border-top: 1px solid var(--eco-line);
-            color: var(--eco-muted);
+        .sidebar-run-card strong { color: var(--cc-ink); }
+
+        .cc-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1.4rem;
+            padding: 1.35rem 1.5rem;
+            margin-bottom: .65rem;
+            border: 1px solid var(--cc-line-2);
+            border-radius: 16px;
+            background:
+                linear-gradient(rgba(255,255,255,.022) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,255,255,.022) 1px, transparent 1px),
+                linear-gradient(120deg, #0d1a16 0%, #0f201b 60%, #0d1a17 100%);
+            background-size: 26px 26px, 26px 26px, auto;
+        }
+        .cc-eyebrow {
+            color: var(--cc-teal);
+            font-size: .68rem;
+            font-weight: 850;
+            letter-spacing: .18em;
+        }
+        .cc-header h1 {
+            margin: .28rem 0 0;
+            color: var(--cc-ink) !important;
+            font-size: clamp(1.7rem, 3vw, 2.5rem);
+            letter-spacing: -.035em;
+            line-height: 1.05;
+        }
+        .cc-mode {
+            display: flex;
+            align-items: center;
+            gap: .7rem;
+            min-width: 250px;
+            padding: .85rem 1rem;
+            border: 1px solid var(--cc-line-2);
+            border-radius: 12px;
+            background: rgba(6, 14, 12, .55);
+        }
+        .cc-mode > div { display: grid; gap: .14rem; }
+        .cc-mode strong { color: var(--cc-ink); font-size: .76rem; letter-spacing: .1em; }
+        .cc-mode small { color: var(--cc-dim); line-height: 1.35; font-size: .72rem; }
+        .mode-signal {
+            display: inline-block;
+            flex: 0 0 auto;
+            width: .62rem;
+            height: .62rem;
+            border: 2px solid rgba(255,255,255,.35);
+            border-radius: 50%;
+            background: var(--cc-teal);
+            box-shadow: 0 0 0 .26rem rgba(45,212,167,.12);
+        }
+        .mode-replay .mode-signal,
+        .banner-replay .mode-signal {
+            background: var(--cc-cyan);
+            box-shadow: 0 0 0 .26rem rgba(56,189,248,.13);
+        }
+        .mode-neutral .mode-signal,
+        .banner-neutral .mode-signal {
+            background: var(--cc-faint);
+            box-shadow: 0 0 0 .26rem rgba(93,115,107,.14);
+        }
+
+        .cc-idbar {
+            display: grid;
+            grid-template-columns: minmax(0, 1.7fr) repeat(5, minmax(0, 1fr));
+            gap: .55rem;
+            margin-bottom: .55rem;
+        }
+        .cc-id {
+            display: grid;
+            gap: .16rem;
+            min-width: 0;
+            padding: .6rem .75rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 10px;
+            background: var(--cc-panel-2);
+        }
+        .cc-id span {
+            color: var(--cc-faint);
+            font-size: .6rem;
+            font-weight: 800;
+            letter-spacing: .12em;
+        }
+        .cc-id strong {
+            overflow: hidden;
+            color: var(--cc-ink);
             font-size: .78rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cc-id code {
+            overflow: hidden;
+            color: var(--cc-teal);
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            background: transparent;
+            font-family: var(--cc-mono);
+            font-size: .76rem;
+        }
+        .cc-id .origin { color: var(--cc-teal); }
+        .status-completed { color: var(--cc-teal); }
+        .status-running { color: var(--cc-cyan); }
+        .status-failed { color: var(--cc-red); }
+        .status-neutral { color: var(--cc-dim); }
+
+        .cc-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: .55rem;
+            margin-bottom: .8rem;
+        }
+        .cc-chip {
+            display: flex;
+            align-items: baseline;
+            gap: .55rem;
+            padding: .45rem .75rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 999px;
+            background: var(--cc-panel-2);
+        }
+        .cc-chip span {
+            color: var(--cc-faint);
+            font-size: .6rem;
+            font-weight: 800;
+            letter-spacing: .12em;
+        }
+        .cc-chip strong { color: var(--cc-ink); font-size: .74rem; font-weight: 650; }
+        .chip-on { border-color: rgba(45,212,167,.36); }
+        .chip-on span { color: var(--cc-teal); }
+        .chip-off strong { color: var(--cc-dim); }
+
+        .cc-panel-head { margin: 1.55rem 0 .8rem; }
+        .cc-panel-head span {
+            color: var(--cc-teal);
+            font-size: .64rem;
+            font-weight: 850;
+            letter-spacing: .17em;
+        }
+        .cc-panel-head h2 {
+            margin: .16rem 0 .2rem;
+            color: var(--cc-ink) !important;
+            font-size: clamp(1.3rem, 2.2vw, 1.7rem);
+            letter-spacing: -.03em;
+        }
+        .cc-panel-head p {
+            max-width: 900px;
+            margin: 0;
+            color: var(--cc-dim);
+            font-size: .86rem;
+            line-height: 1.5;
+        }
+        .cc-subpanel-head { margin: 1.35rem 0 .6rem; }
+        .cc-subpanel-head h3 {
+            margin: 0 0 .14rem;
+            color: var(--cc-ink) !important;
+            font-size: 1.06rem;
+        }
+        .cc-subpanel-head p { margin: 0; color: var(--cc-dim); font-size: .8rem; }
+
+        .cc-grid {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(0, 1fr));
+            gap: .55rem;
+            margin-bottom: .7rem;
+        }
+        .cc-cell {
+            display: grid;
+            gap: .2rem;
+            min-width: 0;
+            padding: .7rem .8rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 10px;
+            background: var(--cc-panel);
+        }
+        .cc-cell span {
+            color: var(--cc-faint);
+            font-size: .6rem;
+            font-weight: 800;
+            letter-spacing: .12em;
+        }
+        .cc-cell strong {
+            overflow: hidden;
+            color: var(--cc-ink);
+            font-size: .82rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .cc-cell small {
+            overflow: hidden;
+            color: var(--cc-dim);
+            font-family: var(--cc-mono);
+            font-size: .68rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .cc-tablewrap {
+            overflow-x: auto;
+            margin: .5rem 0 .8rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        .cc-table { width: 100%; border-collapse: collapse; font-size: .8rem; }
+        .cc-table th {
+            padding: .55rem .75rem;
+            border-bottom: 1px solid var(--cc-line-2);
+            color: var(--cc-faint);
+            font-size: .64rem;
+            font-weight: 800;
+            letter-spacing: .1em;
+            text-align: left;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+        .cc-table td {
+            padding: .5rem .75rem;
+            border-bottom: 1px solid var(--cc-line);
+            color: var(--cc-ink);
+            font-family: var(--cc-mono);
+            font-size: .76rem;
+            white-space: nowrap;
+        }
+        .cc-table tr:last-child td { border-bottom: none; }
+
+        .cc-config-row {
+            display: flex;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: .3rem 0;
+            border-bottom: 1px solid var(--cc-line);
+        }
+        .cc-config-row span { color: var(--cc-dim); font-size: .8rem; }
+        .cc-config-row strong {
+            color: var(--cc-ink);
+            font-family: var(--cc-mono);
+            font-size: .8rem;
+        }
+        .cc-callmeta {
+            display: flex;
+            align-items: baseline;
+            gap: .6rem;
+            margin: .2rem 0 .4rem;
+        }
+        .cc-callmeta span {
+            color: var(--cc-faint);
+            font-size: .64rem;
+            font-weight: 800;
+            letter-spacing: .1em;
+        }
+        .cc-callmeta strong { font-size: .78rem; letter-spacing: .06em; }
+        .cc-callmeta small { color: var(--cc-dim); font-family: var(--cc-mono); }
+        .call-ok { color: var(--cc-teal); }
+        .call-error { color: var(--cc-red); }
+
+        .console {
+            margin: .4rem 0 .9rem;
+            padding: .6rem .4rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 12px;
+            background: #0b1110;
+            font-family: var(--cc-mono);
+            font-size: .74rem;
+        }
+        .console-row {
+            display: grid;
+            grid-template-columns: 5.4rem 5.6rem minmax(7rem, .8fr) 6rem minmax(0, 2fr);
+            gap: .7rem;
+            align-items: baseline;
+            padding: .22rem .6rem;
+        }
+        .console-row:hover { background: rgba(45,212,167,.05); }
+        .c-time { color: var(--cc-faint); }
+        .c-src { font-size: .62rem; font-weight: 800; letter-spacing: .1em; }
+        .src-mcp { color: var(--cc-cyan); }
+        .src-action { color: var(--cc-teal); }
+        .src-energyplus { color: var(--cc-amber); }
+        .c-label { overflow: hidden; color: var(--cc-ink); text-overflow: ellipsis; }
+        .c-status { font-size: .68rem; letter-spacing: .05em; }
+        .c-ok { color: var(--cc-teal); }
+        .c-warn { color: var(--cc-amber); }
+        .c-error { color: var(--cc-red); }
+        .c-dim { color: var(--cc-faint); }
+        .c-detail {
+            overflow: hidden;
+            color: var(--cc-dim);
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+
+        .pipeline {
+            display: flex;
+            align-items: stretch;
+            gap: .45rem;
+            margin: .4rem 0 .9rem;
+            overflow-x: auto;
+            padding-bottom: .25rem;
+        }
+        .pipe-step {
+            display: grid;
+            flex: 1 1 0;
+            gap: .12rem;
+            min-width: 138px;
+            padding: .7rem .8rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        .pipe-step span {
+            color: var(--cc-faint);
+            font-size: .6rem;
+            font-weight: 800;
+            letter-spacing: .12em;
+        }
+        .pipe-step strong { color: var(--cc-ink); font-size: 1.15rem; letter-spacing: -.02em; }
+        .pipe-step small {
+            overflow: hidden;
+            color: var(--cc-dim);
+            font-size: .66rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .pipe-step em {
+            color: var(--cc-faint);
+            font-size: .62rem;
+            font-style: normal;
+            letter-spacing: .08em;
+            text-transform: uppercase;
+        }
+        .step-on { border-color: rgba(45,212,167,.3); }
+        .step-on span, .step-on em { color: var(--cc-teal); }
+        .pipe-arrow {
+            align-self: center;
+            flex: 0 0 auto;
+            color: var(--cc-faint);
+            font-size: 1rem;
+        }
+
+        .telemetry-banner {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            margin: 0 0 .9rem;
+            padding: .66rem .9rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 10px;
+            background: var(--cc-panel-2);
+        }
+        .telemetry-banner > div { display: flex; align-items: center; gap: .6rem; }
+        .telemetry-banner strong {
+            color: var(--cc-ink);
+            font-size: .7rem;
+            letter-spacing: .09em;
+        }
+        .telemetry-banner p { margin: 0; color: var(--cc-dim); font-size: .78rem; }
+        .banner-live { border-color: rgba(45,212,167,.35); }
+        .banner-replay { border-color: rgba(56,189,248,.35); }
+
+        .pair-strip {
+            display: grid;
+            grid-template-columns: minmax(0,1fr) auto minmax(0,1fr) auto;
+            align-items: center;
+            gap: 1rem;
+            margin: .3rem 0 .8rem;
+            padding: .9rem 1rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        .pair-strip > div:not(.pair-arrow):not(.pair-meta) {
+            display: grid;
+            gap: .18rem;
+            min-width: 0;
+        }
+        .pair-strip span {
+            color: var(--cc-faint);
+            font-size: .62rem;
+            font-weight: 800;
+            letter-spacing: .1em;
+        }
+        .pair-strip strong {
+            overflow: hidden;
+            color: var(--cc-ink);
+            font-family: var(--cc-mono);
+            font-size: .76rem;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+        }
+        .pair-arrow { color: var(--cc-teal); font-size: 1.3rem; }
+        .pair-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .4rem; }
+        .pair-meta span {
+            padding: .28rem .5rem;
+            border: 1px solid var(--cc-line);
+            border-radius: 999px;
+            background: var(--cc-panel-2);
+            letter-spacing: .03em;
+        }
+
+        .outcome-banner {
+            margin: .5rem 0 .9rem;
+            padding: .85rem 1rem;
+            border: 1px solid var(--cc-line);
+            border-left: 4px solid var(--cc-cyan);
+            border-radius: 10px;
+            background: var(--cc-panel);
+        }
+        .outcome-banner span {
+            display: block;
+            color: var(--cc-ink);
+            font-size: .98rem;
+            font-weight: 750;
+        }
+        .outcome-banner p { margin: .2rem 0 0; color: var(--cc-dim); font-size: .82rem; }
+        .outcome-positive { border-left-color: var(--cc-teal); }
+        .outcome-caution { border-left-color: var(--cc-amber); }
+
+        .decision-summary {
+            margin: .7rem 0 .8rem;
+            padding: .95rem 1.05rem;
+            border: 1px solid var(--cc-line-2);
+            border-left: 4px solid var(--cc-teal);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        .decision-kicker {
+            display: block;
+            margin-bottom: .25rem;
+            color: var(--cc-faint);
+            font-size: .62rem;
+            font-weight: 800;
+            letter-spacing: .1em;
+        }
+        .decision-summary strong { display: block; color: var(--cc-ink); font-size: 1.05rem; }
+        .decision-summary p { margin: .3rem 0; color: var(--cc-dim); font-size: .84rem; }
+        .decision-summary small { color: var(--cc-faint); font-family: var(--cc-mono); }
+
+        [data-testid="stMetric"] {
+            min-height: 96px;
+            padding: .8rem .9rem;
+            border: 1px solid var(--cc-line);
+            border-top: 2px solid rgba(45,212,167,.35);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] p {
+            color: var(--cc-dim) !important;
+            font-size: .74rem;
+            font-weight: 650;
+        }
+        [data-testid="stMetricValue"] {
+            color: var(--cc-ink) !important;
+            font-weight: 760;
+            letter-spacing: -.03em;
+        }
+        [data-testid="stMetricDelta"] { font-size: .72rem; }
+
+        [data-testid="stDataFrame"],
+        [data-testid="stPlotlyChart"] {
+            overflow: hidden;
+            border: 1px solid var(--cc-line);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        [data-testid="stExpander"] details {
+            border: 1px solid var(--cc-line);
+            border-radius: 12px;
+            background: var(--cc-panel);
+        }
+        [data-testid="stExpander"] summary { color: var(--cc-dim); }
+        [data-testid="stAlert"] {
+            border: 1px solid var(--cc-line-2);
+            border-radius: 10px;
+            background: var(--cc-panel);
+            color: var(--cc-ink);
+        }
+        [data-testid="stAlert"] p { color: var(--cc-ink) !important; }
+        [data-baseweb="select"] > div {
+            border-color: var(--cc-line-2);
+            border-radius: 8px;
+            background: var(--cc-panel);
+        }
+        [data-baseweb="select"] div { color: var(--cc-ink); }
+        [data-baseweb="select"] svg { fill: var(--cc-dim); }
+        .stButton > button { border-radius: 8px; font-weight: 700; }
+        .stButton > button[kind="primary"] {
+            color: #04211a !important;
+            border-color: var(--cc-teal) !important;
+            background: var(--cc-teal) !important;
+        }
+        .stButton > button[kind="primary"] p { color: #04211a !important; }
+        [data-testid="stProgress"] > div > div > div > div {
+            background-color: var(--cc-teal);
+        }
+
+        .ecoloop-footer {
+            margin-top: 2.2rem;
+            padding-top: 1rem;
+            border-top: 1px solid var(--cc-line);
+            color: var(--cc-faint);
+            font-size: .76rem;
+            line-height: 1.6;
             text-align: center;
         }
-        h1, h2, h3, h4 { color: var(--eco-ink); }
-        h3 { margin-top: 1rem; letter-spacing: -.025em; }
-        [data-testid="stAlert"] { border-radius: 14px; }
-        .stButton > button {
-            border-radius: 10px;
-            font-weight: 700;
+        .ecoloop-footer strong { color: var(--cc-dim); }
+
+        @media (max-width: 1150px) {
+            .cc-idbar { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+            .cc-id-wide { grid-column: 1 / -1; }
+            .cc-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .cc-header { align-items: flex-start; flex-direction: column; }
         }
-        @media (max-width: 900px) {
-            .ecoloop-hero { padding: 1.5rem; border-radius: 18px; }
-            .ecoloop-run-strip,
-            .ecoloop-run-strip > div { align-items: flex-start; flex-direction: column; }
-            .ecoloop-run-strip code { max-width: 78vw; }
+        @media (max-width: 760px) {
+            .block-container { padding: .8rem; }
+            .cc-idbar, .cc-grid { grid-template-columns: minmax(0, 1fr); }
+            .console-row {
+                grid-template-columns: 5rem 5rem minmax(0, 1fr);
+            }
+            .c-status, .c-detail { display: none; }
+            .pair-strip { grid-template-columns: minmax(0,1fr); }
+            .pair-arrow { transform: rotate(90deg); }
+            .pair-meta { justify-content: flex-start; }
+            [data-testid="stHorizontalBlock"] { flex-wrap: wrap; }
+            [data-testid="stHorizontalBlock"] > div { min-width: min(100%,280px); flex: 1 1 100%; }
         }
         </style>
         """,
         unsafe_allow_html=True,
     )
-    st.markdown(f"<style>{DASHBOARD_CSS}</style>", unsafe_allow_html=True)
 
 
 if __name__ == "__main__":

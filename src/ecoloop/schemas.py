@@ -6,7 +6,7 @@ Missing optional telemetry remains ``None``; it is never coerced to zero.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from typing import Annotated, Any
 
@@ -580,6 +580,76 @@ class ActionApplicationResult(SchemaModel):
     message: str
 
     _normalize_timestamp = field_validator("timestamp", mode="after")(_as_utc)
+
+
+class PhysicalActuatorApplication(SchemaModel):
+    """Acknowledgement written only after Runtime API actuator calls succeed.
+
+    The simulation timestamps are the actual early-zone callback clock, not the
+    observation or database-acceptance time. ``action_id`` is absent for fixed
+    override and replay actions, which do not originate in ``applied_actions``.
+    """
+
+    run_id: RunId
+    timestamp: AwareDatetime
+    simulation_timestamp: AwareDatetime
+    action_id: Identifier | None = None
+    observation_id: int = Field(ge=1)
+    action_generation: int = Field(ge=1)
+    heating_setpoint_c: FiniteFloat
+    cooling_setpoint_c: FiniteFloat
+    hold_minutes: int = Field(ge=1, le=24 * 60)
+    simulation_expires_at: AwareDatetime
+    wall_expires_at: AwareDatetime | None = None
+    validation_result: str = Field(min_length=1, max_length=100)
+    fallback_status: str | None = Field(default=None, max_length=100)
+    source: str = Field(min_length=1, max_length=100)
+    acknowledgement_source: str = Field(
+        default="runtime_callback",
+        pattern=r"^(runtime_callback|legacy_verified_runtime_message)$",
+    )
+    heating_actuator_handles: tuple[int, ...]
+    cooling_actuator_handles: tuple[int, ...]
+
+    _normalize_timestamps = field_validator(
+        "timestamp",
+        "simulation_timestamp",
+        "simulation_expires_at",
+        mode="after",
+    )(_as_utc)
+    _normalize_optional_wall_expiry = field_validator("wall_expires_at", mode="after")(
+        _optional_as_utc
+    )
+
+    @field_validator("heating_actuator_handles", "cooling_actuator_handles")
+    @classmethod
+    def validate_handles(cls, value: tuple[int, ...]) -> tuple[int, ...]:
+        """Require at least one valid EnergyPlus handle for each write."""
+
+        if any(handle < 0 for handle in value):
+            raise ValueError("actuator handles must be non-negative")
+        if len(value) != len(set(value)):
+            raise ValueError("actuator handles must be unique")
+        return value
+
+    @model_validator(mode="after")
+    def validate_physical_interval(self) -> PhysicalActuatorApplication:
+        """Keep setpoints ordered and simulated expiry tied to the callback."""
+
+        if self.heating_setpoint_c >= self.cooling_setpoint_c:
+            raise ValueError("physical heating setpoint must be below cooling setpoint")
+        if self.acknowledgement_source == "runtime_callback" and (
+            not self.heating_actuator_handles or not self.cooling_actuator_handles
+        ):
+            raise ValueError(
+                "a runtime callback acknowledgement requires both actuator handle sets"
+            )
+        expected_expiry = self.simulation_timestamp + timedelta(minutes=self.hold_minutes)
+        if self.simulation_expires_at != expected_expiry:
+            raise ValueError(
+                "simulation_expires_at must equal the physical callback timestamp plus hold_minutes"
+            )
+        return self
 
 
 class ToolCallTrace(SchemaModel):

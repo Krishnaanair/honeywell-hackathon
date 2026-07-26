@@ -25,7 +25,7 @@ prints:
 - the controlled run ID;
 - the MCP and Ollama connection summary.
 
-Wait for those lines before recording. Open the URL, click **Refresh live data**,
+Wait for those lines before recording. Open the URL, click **Refresh evidence**,
 and select the exact controlled run ID printed by the terminal. Confirm that the
 selected evidence strip shows the expected run type, period, ID, and status.
 `runs/current_run.txt` must contain the same controlled ID.

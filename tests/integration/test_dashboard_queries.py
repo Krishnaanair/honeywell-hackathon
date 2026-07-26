@@ -10,6 +10,7 @@ from ecoloop.dashboard import queries
 from ecoloop.db.store import SQLiteStore
 from ecoloop.schemas import (
     BuildingTelemetry,
+    MessageSeverity,
     RunStatus,
     RunType,
     ZoneTelemetry,
@@ -118,7 +119,11 @@ def test_comparison_status_accepts_distinct_prepared_models_with_same_fingerprin
         store.upsert_metric(
             run_id,
             "final_run_metrics",
-            value_json={"run_id": run_id},
+            value_json={
+                "run_id": run_id,
+                "simulation_start": now.isoformat(),
+                "simulation_end": (now + timedelta(days=1)).isoformat(),
+            },
             source="test-official",
             verified=True,
             timestamp=now,
@@ -143,6 +148,22 @@ def test_comparison_status_accepts_distinct_prepared_models_with_same_fingerprin
     allowed, message = queries.compare_status(database, "baseline", "agent")
     assert allowed
     assert "compatible" in message.lower()
+
+    store.upsert_metric(
+        "agent",
+        "final_run_metrics",
+        value_json={
+            "run_id": "agent",
+            "simulation_start": now.isoformat(),
+            "simulation_end": (now + timedelta(days=1, minutes=15)).isoformat(),
+        },
+        source="test-window-mismatch",
+        verified=True,
+        timestamp=now,
+    )
+    allowed, message = queries.compare_status(database, "baseline", "agent")
+    assert not allowed
+    assert "simulation windows" in message.lower()
 
 
 def test_comparison_status_requires_matching_weather_checksum_and_publication_checks(
@@ -461,7 +482,14 @@ def _seed_statistics_run(tmp_path):
             timestamp=now,
         )
     for name, payload in (
-        ("final_run_metrics", {"run_id": "agent-real"}),
+        (
+            "final_run_metrics",
+            {
+                "run_id": "agent-real",
+                "simulation_start": now.isoformat(),
+                "simulation_end": (now + timedelta(minutes=30)).isoformat(),
+            },
+        ),
         ("energy_cross_check", {"passed": True}),
         ("finalization_verification", {"verified_for_comparison": True}),
     ):
@@ -571,7 +599,14 @@ def test_comparison_statistics_requires_compatible_verified_real_runs(tmp_path):
             timestamp=now,
         )
     for name, payload in (
-        ("final_run_metrics", {"run_id": "baseline-real"}),
+        (
+            "final_run_metrics",
+            {
+                "run_id": "baseline-real",
+                "simulation_start": now.isoformat(),
+                "simulation_end": (now + timedelta(minutes=30)).isoformat(),
+            },
+        ),
         ("energy_cross_check", {"passed": True}),
         ("finalization_verification", {"verified_for_comparison": True}),
     ):
@@ -615,3 +650,175 @@ def test_statistics_reject_fake_runs(tmp_path):
         queries.run_statistics(database, "fake-run")
     with pytest.raises(queries.DashboardDataError, match="Fake runs"):
         queries.comfort_distribution(database, "fake-run")
+
+
+def test_latest_tool_call_returns_arguments_and_result(tmp_path):
+    database, _, _, _ = _seed_statistics_run(tmp_path)
+
+    latest = queries.latest_tool_call(database, "agent-real")
+    apply_call = queries.latest_tool_call(
+        database,
+        "agent-real",
+        tool_name="apply_control_action",
+    )
+
+    assert latest is not None
+    assert latest["tool_name"] == "get_constraints"
+    assert latest["sequence"] == 3
+    assert latest["success"] == 0
+    assert apply_call is not None
+    assert apply_call["tool_name"] == "apply_control_action"
+    assert apply_call["arguments_json"] == "{}"
+    assert apply_call["result_json"] == "{}"
+    assert apply_call["success"] == 1
+    assert apply_call["control_affecting"] == 1
+    assert queries.latest_tool_call(database, "agent-real", tool_name="missing_tool") is None
+
+
+def test_action_log_reports_simulated_time_and_application_state(tmp_path):
+    database, _, _, _ = _seed_statistics_run(tmp_path)
+
+    log = queries.action_log(database, "agent-real")
+
+    assert log["action_generation"].tolist() == [2, 1]
+    assert log["applied"].tolist() == [0, 1]
+    assert log["simulation_timestamp"].notna().all()
+    applied_row = log.iloc[1]
+    assert "heating_setpoint_c" in applied_row["applied_values"]
+    assert "heating_setpoint_c" in applied_row["clamp_details"]
+    unapplied_row = log.iloc[0]
+    assert unapplied_row["applied_values"] == ""
+    assert unapplied_row["clamp_details"] == "[]"
+
+
+def test_system_console_events_merge_only_persisted_sources(tmp_path):
+    database, store, now, _ = _seed_statistics_run(tmp_path)
+    store.record_simulation_message(
+        "agent-real",
+        MessageSeverity.WARNING,
+        "Zone temperature out of range",
+        timestamp=now,
+    )
+    store.record_simulation_message(
+        "agent-real",
+        MessageSeverity.WARNING,
+        "Zone temperature out of range",
+        timestamp=now + timedelta(minutes=1),
+    )
+    store.record_simulation_message(
+        "agent-real",
+        MessageSeverity.SEVERE,
+        "Example severe diagnostic",
+        timestamp=now,
+    )
+
+    events = queries.system_console_events(database, "agent-real")
+
+    # 3 tool calls + 1 applied action + 2 deduplicated messages, nothing invented.
+    assert len(events) == 6
+    assert set(events["source"]) == {"mcp", "action", "energyplus"}
+    newest = events.iloc[0]
+    assert newest["source"] == "energyplus"
+    assert newest["label"] == "warning"
+    mcp_events = events[events["source"] == "mcp"]
+    assert set(mcp_events["status"]) == {"ok", "error"}
+    action_events = events[events["source"] == "action"]
+    assert action_events["status"].tolist() == ["fallback"]
+    assert len(queries.system_console_events(database, "agent-real", limit=2)) == 2
+
+
+def test_simulation_message_counts_sum_occurrences(tmp_path):
+    database, store, now, _ = _seed_statistics_run(tmp_path)
+
+    assert queries.simulation_message_counts(database, "agent-real") == {}
+
+    store.record_simulation_message(
+        "agent-real",
+        MessageSeverity.WARNING,
+        "Zone temperature out of range",
+        timestamp=now,
+    )
+    store.record_simulation_message(
+        "agent-real",
+        MessageSeverity.WARNING,
+        "Zone temperature out of range",
+        timestamp=now + timedelta(minutes=1),
+    )
+    store.record_simulation_message(
+        "agent-real",
+        MessageSeverity.SEVERE,
+        "Example severe diagnostic",
+        timestamp=now,
+    )
+
+    counts = queries.simulation_message_counts(database, "agent-real")
+    assert counts == {"warning": 2, "severe": 1}
+
+
+def test_aligned_demand_joins_only_matching_simulated_timestamps(tmp_path):
+    database, store, now, metadata = _seed_statistics_run(tmp_path)
+    store.create_run(
+        "baseline-real",
+        RunType.BASELINE,
+        energyplus_version="26.1.0",
+        model_path=tmp_path / "baseline.idf",
+        weather_path=tmp_path / "weather.epw",
+        period_name="smoke",
+        metadata=metadata,
+        timestamp=now,
+    )
+    store.set_run_status("baseline-real", RunStatus.RUNNING, timestamp=now)
+    for index, demand in enumerate((8.0, 9.5), start=1):
+        store.record_telemetry(
+            BuildingTelemetry(
+                run_id="baseline-real",
+                timestamp=now,
+                simulation_timestamp=now + timedelta(minutes=15 * index),
+                timestep_key=f"baseline-real:summer:07-15:00:{15 * index:02}:1",
+                environment="summer",
+                facility_demand_kw=demand,
+            )
+        )
+
+    aligned = queries.aligned_demand(database, "baseline-real", "agent-real")
+
+    assert len(aligned) == 2
+    assert aligned["facility_demand_kw_baseline"].tolist() == [8.0, 9.5]
+    assert aligned["facility_demand_kw_controlled"].tolist() == [10.0, 12.0]
+
+
+def test_run_artifacts_list_recorded_evidence(tmp_path):
+    database, store, now, _ = _seed_statistics_run(tmp_path)
+
+    assert queries.run_artifacts(database, "agent-real").empty
+
+    recorded = store.record_artifact(
+        "agent-real",
+        "energyplus_csv",
+        tmp_path / "eplusout.csv",
+        sha256="d" * 64,
+        size_bytes=128,
+        timestamp=now,
+    )
+    assert recorded
+
+    artifacts = queries.run_artifacts(database, "agent-real")
+    assert artifacts["artifact_type"].tolist() == ["energyplus_csv"]
+    assert artifacts["sha256"].tolist() == ["d" * 64]
+    assert artifacts["size_bytes"].tolist() == [128]
+
+
+def test_new_evidence_queries_reject_fake_runs(tmp_path):
+    database = tmp_path / "ecoloop.db"
+    store = SQLiteStore(database)
+    store.create_run("fake-run", RunType.AGENT, is_fake=True)
+
+    for reader in (
+        lambda: queries.latest_tool_call(database, "fake-run"),
+        lambda: queries.system_console_events(database, "fake-run"),
+        lambda: queries.action_log(database, "fake-run"),
+        lambda: queries.simulation_message_counts(database, "fake-run"),
+        lambda: queries.run_artifacts(database, "fake-run"),
+    ):
+        with pytest.raises(queries.DashboardDataError, match="Fake runs"):
+            reader()

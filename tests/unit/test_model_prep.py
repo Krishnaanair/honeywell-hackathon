@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -17,8 +18,8 @@ from ecoloop.energyplus.model import (
 )
 from ecoloop.energyplus.replay import replay_actions_from_store
 from ecoloop.exceptions import EnergyPlusIntegrationError
-from ecoloop.schemas import ValidationResult
-from tests.unit._factories import NOW, action, candidate, observation
+from ecoloop.schemas import PhysicalActuatorApplication, ValidationResult
+from tests.unit._factories import NOW, action, candidate
 
 
 def _container(properties: dict[str, object]) -> dict[str, object]:
@@ -245,7 +246,7 @@ def test_generated_json_uses_lf_line_endings(tmp_path: Path) -> None:
 
 
 class _ReplayStore:
-    def __init__(self, has_actions: bool = True) -> None:
+    def __init__(self, has_actions: bool = True, has_physical: bool = True) -> None:
         proposed = action()
         validation = ValidationResult(
             run_id=proposed.run_id,
@@ -262,23 +263,71 @@ class _ReplayStore:
             applied_expires_at=proposed.expires_at,
         )
         self.pairs = [(proposed, validation)] if has_actions else []
+        callback_time = NOW + timedelta(minutes=15)
+        self.physical = (
+            [
+                PhysicalActuatorApplication(
+                    run_id=proposed.run_id,
+                    timestamp=NOW,
+                    simulation_timestamp=callback_time,
+                    action_id=proposed.action_id,
+                    observation_id=proposed.observation_id,
+                    action_generation=proposed.action_generation,
+                    heating_setpoint_c=20.5,
+                    cooling_setpoint_c=24.5,
+                    hold_minutes=60,
+                    simulation_expires_at=callback_time + timedelta(minutes=60),
+                    wall_expires_at=proposed.expires_at,
+                    validation_result="valid",
+                    source="sqlite_validated_action",
+                    heating_actuator_handles=(101,),
+                    cooling_actuator_handles=(202,),
+                )
+            ]
+            if has_actions and has_physical
+            else []
+        )
 
     def get_applied_actions(self, run_id: str, *, limit: int = 10_000):
         return self.pairs[:limit]
 
-    def get_observation(self, run_id: str, observation_id: int):
-        return observation(run_id=run_id, observation_id=observation_id)
+    def get_physical_actuator_applications(
+        self,
+        run_id: str,
+        *,
+        limit: int = 10_000,
+    ):
+        return self.physical[:limit]
+
+    def get_verified_legacy_physical_actuator_applications(
+        self,
+        run_id: str,
+        *,
+        limit: int = 10_000,
+    ):
+        return []
 
 
 def test_replay_actions_use_simulation_timestamp_and_applied_values() -> None:
     actions = replay_actions_from_store("run-agent-1", _ReplayStore())
     assert len(actions) == 1
-    assert actions[0].simulation_timestamp == NOW.replace(tzinfo=None).isoformat()
+    assert (
+        actions[0].simulation_timestamp
+        == (NOW + timedelta(minutes=15)).replace(tzinfo=None).isoformat()
+    )
     assert actions[0].heating_setpoint_c == 20.5
     assert actions[0].cooling_setpoint_c == 24.5
     assert actions[0].hold_minutes == 60
 
 
 def test_replay_generation_rejects_run_without_applied_actions() -> None:
-    with pytest.raises(EnergyPlusIntegrationError, match="no accepted applied actions"):
+    with pytest.raises(EnergyPlusIntegrationError, match="no exact physical"):
         replay_actions_from_store("run-agent-1", _ReplayStore(has_actions=False))
+
+
+def test_replay_generation_rejects_queued_action_without_physical_acknowledgement() -> None:
+    with pytest.raises(EnergyPlusIntegrationError, match="no exact physical"):
+        replay_actions_from_store(
+            "run-agent-1",
+            _ReplayStore(has_physical=False),
+        )

@@ -15,6 +15,7 @@ from ecoloop.schemas import (
     BuildingTelemetry,
     MessageSeverity,
     ObservationInput,
+    PhysicalActuatorApplication,
     RunStatus,
     RunType,
     ZoneTelemetry,
@@ -323,8 +324,8 @@ class SQLiteRuntimeStoreAdapter:
             tariff_per_kwh=self._settings.tariff_per_kwh,
             carbon_kg_per_kwh=self._settings.carbon_kg_per_kwh,
             actuator_capabilities=ActuatorCapabilities(
-                heating_setpoint=self._controlled,
-                cooling_setpoint=self._controlled,
+                heating_setpoint=bool(values.get("heating_setpoint_actuator_available", False)),
+                cooling_setpoint=bool(values.get("cooling_setpoint_actuator_available", False)),
             ),
             zones=self.store.get_zone_telemetry(run_id, timestep_identity),
         )
@@ -348,6 +349,7 @@ class SQLiteRuntimeStoreAdapter:
         applied = validation.applied_action
         return {
             "run_id": action.run_id,
+            "action_id": action.action_id,
             "observation_id": action.observation_id,
             "action_generation": action.action_generation,
             "applied_heating_setpoint_c": applied.heating_setpoint_c,
@@ -356,19 +358,56 @@ class SQLiteRuntimeStoreAdapter:
             "simulation_expires_at": None,
             "hold_minutes": applied.hold_minutes,
             "validation_result": "clamped" if validation.clamps else "valid",
-            "fallback_status": bool(validation.fallback_status),
+            "fallback_status": validation.fallback_status,
             "source": "sqlite_validated_action",
             "requested_observation_id": observation_id,
         }
 
-    def record_applied_action(
+    def record_physical_actuator_application(
         self,
         run_id: str,
         timestamp: str,
         values: Mapping[str, Any],
     ) -> None:
-        """Audit physical actuator application without duplicating action rows."""
+        """Persist the actual callback write, then emit a human-readable sidecar."""
 
+        simulation_timestamp = _simulation_datetime(timestamp)
+        simulation_expiry_raw = values.get("simulation_expires_at")
+        if not isinstance(simulation_expiry_raw, str):
+            raise ValueError("physical application is missing simulation_expires_at")
+        wall_expiry_raw = values.get("wall_expires_at")
+        application = PhysicalActuatorApplication(
+            run_id=run_id,
+            timestamp=utc_now(),
+            simulation_timestamp=simulation_timestamp,
+            action_id=(str(values["action_id"]) if values.get("action_id") is not None else None),
+            observation_id=int(values["observation_id"]),
+            action_generation=int(values["action_generation"]),
+            heating_setpoint_c=float(values["applied_heating_setpoint_c"]),
+            cooling_setpoint_c=float(values["applied_cooling_setpoint_c"]),
+            hold_minutes=int(values["hold_minutes"]),
+            simulation_expires_at=_simulation_datetime(simulation_expiry_raw),
+            wall_expires_at=(
+                datetime.fromisoformat(str(wall_expiry_raw).replace("Z", "+00:00"))
+                if wall_expiry_raw is not None
+                else None
+            ),
+            validation_result=str(values["validation_result"]),
+            fallback_status=(
+                str(values["fallback_status"])
+                if values.get("fallback_status") is not None
+                else None
+            ),
+            source=str(values["source"]),
+            acknowledgement_source="runtime_callback",
+            heating_actuator_handles=tuple(
+                int(handle) for handle in values["heating_actuator_handles"]
+            ),
+            cooling_actuator_handles=tuple(
+                int(handle) for handle in values["cooling_actuator_handles"]
+            ),
+        )
+        self.store.record_physical_actuator_application(application)
         message = (
             f"Applied thermostat actuators generation={values['action_generation']} "
             f"observation={values['observation_id']} "

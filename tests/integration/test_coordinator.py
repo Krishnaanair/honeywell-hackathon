@@ -713,15 +713,19 @@ def test_real_run_prepares_selected_period_and_snapshots_inputs(
         ECOLOOP_WEATHER_PATH=weather,
     )
     preparation_calls: list[object] = []
+    preparation_outputs: list[Path | None] = []
     captured_requests: list[SimulationRequest] = []
 
     def fake_prepare(
         supplied_settings: object,
         period: object,
         source_override: Path | None = None,
+        *,
+        output_directory: Path | None = None,
     ) -> ModelArtifacts:
         del supplied_settings, source_override
         preparation_calls.append(period)
+        preparation_outputs.append(output_directory)
         return ModelArtifacts(
             source_model=source,
             baseline_model=baseline_model,
@@ -763,6 +767,9 @@ def test_real_run_prepares_selected_period_and_snapshots_inputs(
 
     assert result["status"] == "failed"
     assert len(preparation_calls) == 1
+    assert preparation_outputs[0] is not None
+    assert preparation_outputs[0].parent.name.startswith("baseline-")
+    assert preparation_outputs[0].name == "prepared"
     assert len(captured_requests) == 1
     request = captured_requests[0]
     assert request.model_path.parent.name == "inputs"

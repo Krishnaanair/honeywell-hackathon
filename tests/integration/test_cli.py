@@ -31,6 +31,15 @@ def test_cli_version_reports_package_version() -> None:
     assert result.stdout.strip() == __version__
 
 
+def test_dashboard_help_keeps_test_runs_out_of_production_surface() -> None:
+    result = runner.invoke(app, ["dashboard", "--help"])
+
+    assert result.exit_code == 0
+    assert "--include-fake" not in result.stdout
+    assert "--port" in result.stdout
+    assert "--address" in result.stdout
+
+
 def test_prepare_model_rejects_unknown_period_before_external_work() -> None:
     result = runner.invoke(app, ["prepare-model", "--period", "unknown"])
     assert result.exit_code == 1

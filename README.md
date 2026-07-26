@@ -11,10 +11,25 @@ supported thermostat schedule actuators through PyEnergyPlus.
 
 <!-- BEGIN VERIFIED_EVALUATION_STATUS -->
 > Evidence status: the actuator proof, one-day closed-loop acceptance test, and
-> matched seven-day EnergyPlus 26.1 comparison are verified. In the configured
-> Chicago week, EcoLoop improved occupied-temperature compliance from 67.77% to
-> 90.31%, but used 10.52% more facility electricity and raised peak demand by
-> 5.32%. The result is a measured comfort/energy trade-off, not a savings claim.
+> matched seven-day EnergyPlus 26.1 comparison are verified. Every published
+> number is recomputed from official EnergyPlus output; none is estimated.
+>
+> Two verified one-day operating points share one documented policy weight,
+> measured against the same baseline (`baseline-20260726T180508Z-48166652`,
+> 217.912 kWh, 69.62% compliance):
+>
+> | Mode | Facility electricity | Occupied compliance |
+> | --- | ---: | ---: |
+> | Comfort-max | +9.53% | 69.62% -> 90.38% |
+> | Energy-lean | **+2.09%** | 69.62% -> 81.92% |
+>
+> In the configured Chicago week, EcoLoop improved occupied-temperature
+> compliance from 67.77% to 90.31% while using 10.52% more facility
+> electricity. These are measured comfort/energy trade-offs, not savings
+> claims: this baseline is already lean because it lets occupied zones exceed
+> the comfort band 30% of the time, and EcoLoop's deterministic safety layer
+> refuses to reproduce that discomfort. Pushing the dial below baseline energy
+> at the comfort boundary is the next documented experiment.
 <!-- END VERIFIED_EVALUATION_STATUS -->
 
 Canonical run identities, measured values, and publication status live in

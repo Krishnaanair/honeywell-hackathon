@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import sqlite3
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from ecoloop.schemas import (
     ControlAction,
     MessageSeverity,
     ObservationInput,
+    PhysicalActuatorApplication,
     RunRecord,
     RunStatus,
     RunType,
@@ -35,6 +37,15 @@ from ecoloop.schemas import (
 from ecoloop.time_utils import isoformat_utc, parse_iso_datetime, utc_now
 
 Clock = Callable[[], datetime]
+
+_LEGACY_PHYSICAL_APPLICATION_PATTERN = re.compile(
+    r"^Applied thermostat actuators generation=(?P<generation>[1-9][0-9]*) "
+    r"observation=(?P<observation>[1-9][0-9]*) "
+    r"heating=(?P<heating>-?[0-9]+(?:\.[0-9]+)?)C "
+    r"cooling=(?P<cooling>-?[0-9]+(?:\.[0-9]+)?)C "
+    r"source=(?P<source>[a-z0-9_]+) "
+    r"simulation_timestamp=(?P<simulation_timestamp>[0-9T:.-]+)$"
+)
 
 
 class StoreError(RuntimeError):
@@ -80,6 +91,20 @@ def _enum_value(value: RunType | RunStatus | MessageSeverity | ValidationCode | 
 
 def _optional_float(value: Any) -> float | None:
     return float(value) if value is not None else None
+
+
+def _parse_legacy_simulation_timestamp(value: str) -> datetime:
+    """Interpret the historical EnergyPlus callback clock as UTC-like simulation time."""
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise StoreError(
+            f"legacy physical callback has an invalid simulation timestamp: {value!r}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 class SQLiteStore:
@@ -847,6 +872,258 @@ class SQLiteStore:
                 (run_id, limit),
             ).fetchall()
         return [self._action_pair_from_row(row) for row in rows]
+
+    def record_physical_actuator_application(
+        self,
+        application: PhysicalActuatorApplication,
+    ) -> bool:
+        """Append one acknowledgement after both Runtime API writes succeed.
+
+        An exact retry is idempotent. Reusing a run/generation identity with
+        different callback evidence is a conflict and never overwrites history.
+        """
+
+        if application.acknowledgement_source != "runtime_callback":
+            raise ValueError("only runtime callback acknowledgements may be persisted")
+        values = (
+            application.run_id,
+            isoformat_utc(application.timestamp),
+            isoformat_utc(application.simulation_timestamp),
+            application.action_id,
+            application.observation_id,
+            application.action_generation,
+            float(application.heating_setpoint_c),
+            float(application.cooling_setpoint_c),
+            application.hold_minutes,
+            isoformat_utc(application.simulation_expires_at),
+            (
+                isoformat_utc(application.wall_expires_at)
+                if application.wall_expires_at is not None
+                else None
+            ),
+            application.validation_result,
+            application.fallback_status,
+            application.source,
+            application.acknowledgement_source,
+            _json_dumps(application.heating_actuator_handles),
+            _json_dumps(application.cooling_actuator_handles),
+        )
+        with self._connection() as connection:
+            run = connection.execute(
+                "SELECT status FROM runs WHERE run_id = ?",
+                (application.run_id,),
+            ).fetchone()
+            if run is None:
+                raise RunStateError(f"unknown run_id: {application.run_id}")
+            if str(run["status"]) != RunStatus.RUNNING.value:
+                raise RunStateError(
+                    "physical actuator acknowledgements require a running simulation"
+                )
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO actuator_applications (
+                        run_id, timestamp, simulation_timestamp, action_id,
+                        observation_id, action_generation, heating_setpoint_c,
+                        cooling_setpoint_c, hold_minutes, simulation_expires_at,
+                        wall_expires_at, validation_result, fallback_status,
+                        source, acknowledgement_source,
+                        heating_actuator_handles_json,
+                        cooling_actuator_handles_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    values,
+                )
+                return True
+            except sqlite3.IntegrityError as exc:
+                existing_row = connection.execute(
+                    """
+                    SELECT *
+                    FROM actuator_applications
+                    WHERE run_id = ? AND action_generation = ?
+                    """,
+                    (application.run_id, application.action_generation),
+                ).fetchone()
+                if (
+                    existing_row is not None
+                    and self._physical_application_from_row(existing_row) == application
+                ):
+                    return False
+                raise DataConflictError(
+                    "physical actuator application generation conflicts with "
+                    f"existing audit data: {application.run_id}/"
+                    f"{application.action_generation}"
+                ) from exc
+
+    def get_physical_actuator_applications(
+        self,
+        run_id: str,
+        *,
+        limit: int = 10_000,
+    ) -> list[PhysicalActuatorApplication]:
+        """Return structured callback acknowledgements in generation order."""
+
+        if not 1 <= limit <= 100_000:
+            raise ValueError("limit must be in 1..100000")
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT *
+                FROM actuator_applications
+                WHERE run_id = ?
+                ORDER BY action_generation ASC
+                LIMIT ?
+                """,
+                (run_id, limit),
+            ).fetchall()
+        return [self._physical_application_from_row(row) for row in rows]
+
+    def get_verified_legacy_physical_actuator_applications(
+        self,
+        run_id: str,
+        *,
+        limit: int = 10_000,
+    ) -> list[PhysicalActuatorApplication]:
+        """Recover exact pre-migration callback times from verified audit messages.
+
+        This compatibility path is intentionally strict: every queued action
+        must have exactly one canonical post-write message with matching
+        generation, observation, source, and rounded setpoints. Partial or
+        ambiguous history raises instead of inferring a timestep.
+        """
+
+        if not 1 <= limit <= 100_000:
+            raise ValueError("limit must be in 1..100000")
+        pairs = self.get_applied_actions(run_id, limit=limit)
+        with self._connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT timestamp, message, occurrence_count
+                FROM simulation_messages
+                WHERE run_id = ?
+                  AND message LIKE 'Applied thermostat actuators generation=%'
+                ORDER BY message_id ASC
+                LIMIT ?
+                """,
+                (run_id, limit),
+            ).fetchall()
+        if not rows and not pairs:
+            return []
+        if len(rows) != len(pairs):
+            raise StoreError(
+                "legacy physical actuator audit is incomplete: "
+                f"{len(rows)} callback messages for {len(pairs)} queued actions"
+            )
+        pair_by_generation = {
+            action.action_generation: (action, result) for action, result in pairs
+        }
+        if len(pair_by_generation) != len(pairs):
+            raise StoreError("queued action generations are not unique")
+
+        recovered: list[PhysicalActuatorApplication] = []
+        seen: set[int] = set()
+        for row in rows:
+            if int(row["occurrence_count"]) != 1:
+                raise StoreError("legacy physical callback message was deduplicated ambiguously")
+            match = _LEGACY_PHYSICAL_APPLICATION_PATTERN.fullmatch(str(row["message"]))
+            if match is None:
+                raise StoreError("legacy physical callback message has an unsupported format")
+            generation = int(match.group("generation"))
+            if generation in seen or generation not in pair_by_generation:
+                raise StoreError("legacy physical callback generation cannot be matched uniquely")
+            seen.add(generation)
+            action, validation = pair_by_generation[generation]
+            applied = validation.applied_action
+            if not validation.accepted or applied is None:
+                raise StoreError("legacy callback references an action that was not accepted")
+            observation_id = int(match.group("observation"))
+            source = match.group("source")
+            heating = float(match.group("heating"))
+            cooling = float(match.group("cooling"))
+            if (
+                observation_id != action.observation_id
+                or source != "sqlite_validated_action"
+                or not math.isclose(
+                    heating,
+                    float(applied.heating_setpoint_c),
+                    rel_tol=0.0,
+                    abs_tol=0.00051,
+                )
+                or not math.isclose(
+                    cooling,
+                    float(applied.cooling_setpoint_c),
+                    rel_tol=0.0,
+                    abs_tol=0.00051,
+                )
+            ):
+                raise StoreError(
+                    "legacy physical callback does not match its queued validated action"
+                )
+            simulation_timestamp = _parse_legacy_simulation_timestamp(
+                match.group("simulation_timestamp")
+            )
+            observation = self.get_observation(run_id, observation_id)
+            if observation is None or simulation_timestamp <= observation.simulation_timestamp:
+                raise StoreError(
+                    "legacy physical callback is not after its originating observation"
+                )
+            recovered.append(
+                PhysicalActuatorApplication(
+                    run_id=run_id,
+                    timestamp=parse_iso_datetime(str(row["timestamp"])),
+                    simulation_timestamp=simulation_timestamp,
+                    action_id=action.action_id,
+                    observation_id=observation_id,
+                    action_generation=generation,
+                    heating_setpoint_c=heating,
+                    cooling_setpoint_c=cooling,
+                    hold_minutes=applied.hold_minutes,
+                    simulation_expires_at=simulation_timestamp
+                    + timedelta(minutes=applied.hold_minutes),
+                    wall_expires_at=action.expires_at,
+                    validation_result=("clamped" if validation.clamps else "valid"),
+                    fallback_status=validation.fallback_status,
+                    source=source,
+                    acknowledgement_source="legacy_verified_runtime_message",
+                    heating_actuator_handles=(),
+                    cooling_actuator_handles=(),
+                )
+            )
+        if seen != set(pair_by_generation):
+            raise StoreError("legacy physical callback audit is missing action generations")
+        return sorted(recovered, key=lambda item: item.action_generation)
+
+    @staticmethod
+    def _physical_application_from_row(
+        row: sqlite3.Row,
+    ) -> PhysicalActuatorApplication:
+        """Build one typed physical acknowledgement from a database row."""
+
+        heating_handles = json.loads(str(row["heating_actuator_handles_json"]))
+        cooling_handles = json.loads(str(row["cooling_actuator_handles_json"]))
+        if not isinstance(heating_handles, list) or not isinstance(cooling_handles, list):
+            raise StoreError("physical actuator handle columns must contain JSON arrays")
+        return PhysicalActuatorApplication.model_validate(
+            {
+                "run_id": row["run_id"],
+                "timestamp": row["timestamp"],
+                "simulation_timestamp": row["simulation_timestamp"],
+                "action_id": row["action_id"],
+                "observation_id": row["observation_id"],
+                "action_generation": row["action_generation"],
+                "heating_setpoint_c": row["heating_setpoint_c"],
+                "cooling_setpoint_c": row["cooling_setpoint_c"],
+                "hold_minutes": row["hold_minutes"],
+                "simulation_expires_at": row["simulation_expires_at"],
+                "wall_expires_at": row["wall_expires_at"],
+                "validation_result": row["validation_result"],
+                "fallback_status": row["fallback_status"],
+                "source": row["source"],
+                "acknowledgement_source": row["acknowledgement_source"],
+                "heating_actuator_handles": tuple(int(value) for value in heating_handles),
+                "cooling_actuator_handles": tuple(int(value) for value in cooling_handles),
+            }
+        )
 
     @staticmethod
     def _action_pair_from_row(

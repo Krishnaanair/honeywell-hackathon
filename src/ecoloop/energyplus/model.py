@@ -746,6 +746,16 @@ def _sha256_model_text(path: Path) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _sha256_file(path: Path) -> str:
+    """Hash an artifact exactly as written."""
+
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _portable_repository_path(path: Path) -> str:
     """Return a portable repository path, or only a non-repository basename."""
 
@@ -928,8 +938,14 @@ def prepare_models(
     settings: object,
     period: PeriodProtocol,
     source: Path | None = None,
+    *,
+    output_directory: Path | None = None,
 ) -> ModelArtifacts:
-    """Prepare baseline, agent-ready, and replay-ready IDFs using EnergyPlus tooling."""
+    """Prepare baseline, agent-ready, and replay-ready IDFs using EnergyPlus tooling.
+
+    ``prepare-model`` uses the canonical repository directory. Runtime callers
+    pass a run-local directory so an experiment cannot mutate tracked models.
+    """
 
     installation = require_energyplus(settings, model_tooling=True)
     if installation.schema is None:
@@ -946,7 +962,11 @@ def prepare_models(
         Path(configured_model),
         source,
     )
-    generated = root / "models" / "generated"
+    generated = (
+        output_directory.expanduser().resolve()
+        if output_directory is not None
+        else (root / "models" / "generated").resolve()
+    )
     generated.mkdir(parents=True, exist_ok=True)
     schema_data, schema = load_epjson_schema(installation.schema)
     del schema_data
@@ -1012,8 +1032,20 @@ def prepare_models(
             "source_model": _portable_repository_path(source_model),
             "source_model_sha256": _sha256_model_text(source_model),
             "source_model_sha256_mode": "utf-8-text-lf-normalized",
+            "period": {
+                "start_month": int(period.start_month),
+                "start_day": int(period.start_day),
+                "end_month": int(period.end_month),
+                "end_day": int(period.end_day),
+            },
             "baseline": baseline_metadata,
             "agent_ready": agent_metadata,
+            "generated_artifacts": {
+                "baseline_idf_sha256": _sha256_file(baseline_idf),
+                "agent_ready_idf_sha256": _sha256_file(agent_idf),
+                "agent_replay_idf_sha256": _sha256_file(replay_idf),
+                "actuator_map_sha256": _sha256_file(actuator_map),
+            },
             "replay_method": (
                 "EnergyPlus Runtime API applies action_schedule.csv to the same discovered "
                 "schedule actuators; no local model inference is called."

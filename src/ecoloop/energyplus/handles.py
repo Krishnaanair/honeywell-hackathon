@@ -396,6 +396,44 @@ class HandleRegistry:
             if normalize_point_name(record.spec.logical_metric) == normalized
         )
 
+    def write_resolved_csv(self, path: Path) -> Path:
+        """Persist the resolved registry, including unavailable optional points."""
+
+        if not self._resolved:
+            raise HandleDiscoveryError("handle registry has not been resolved")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(
+                handle,
+                fieldnames=(
+                    "logical_metric",
+                    "kind",
+                    "energyplus_name",
+                    "control_type",
+                    "key",
+                    "handle",
+                    "units",
+                    "required",
+                    "available",
+                ),
+            )
+            writer.writeheader()
+            for record in self.records:
+                writer.writerow(
+                    {
+                        "logical_metric": record.spec.logical_metric,
+                        "kind": record.spec.kind.value,
+                        "energyplus_name": record.spec.name,
+                        "control_type": record.spec.control_type or "",
+                        "key": record.spec.key,
+                        "handle": record.handle,
+                        "units": record.units or "",
+                        "required": str(record.spec.required).lower(),
+                        "available": str(record.available).lower(),
+                    }
+                )
+        return path
+
 
 def default_observation_specs() -> tuple[HandleSpec, ...]:
     """Return required and capability-dependent telemetry specifications."""
@@ -481,6 +519,7 @@ def default_observation_specs() -> tuple[HandleSpec, ...]:
             "facility_net_electricity_j",
             meter,
             "ElectricityNet:Facility",
+            required=False,
         ),
         HandleSpec(
             "hvac_electricity_j",

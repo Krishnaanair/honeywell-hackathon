@@ -2,9 +2,16 @@
 
 Last updated: 2026-07-26
 
+> Rescue note: this plan began as the original implementation plan. The current
+> work is an evidence-preserving audit and repair of the existing repository,
+> not a greenfield rewrite. The protected source state and repair decisions are
+> recorded in `docs/audit/`.
+
 ## Assumptions
 
-- This workspace started empty and is being initialized as the EcoLoop repository.
+- The repository now contains useful executed EnergyPlus, MCP, Ollama,
+  dashboard, reporting and presentation work that must be preserved unless an
+  evidence-backed defect requires repair.
 - The supported runtime is Python 3.11 even if a developer machine also has newer
   interpreters installed.
 - EnergyPlus 26.1.0 is an external system dependency. It is discovered at runtime

@@ -99,6 +99,13 @@ total =
 Temperature slope and a simple fitted/online response coefficient may estimate
 near-term direction. The scorer does not claim full MPC.
 
+The current stability term is 0.15 score units per degree Celsius of setpoint
+change. This replaces the original 1.5 coefficient after the hostile
+representative-week review showed that the former penalty kept cooling at
+23 C long after comfort recovery and dominated the estimated energy benefit of
+relaxing the setpoint. The repaired coefficient is a documented policy
+assumption; no new savings claim is made until a fresh compatible week is run.
+
 The local model must choose an evaluated candidate or request fallback. It
 cannot invent an out-of-grid actuator value and bypass validation.
 
