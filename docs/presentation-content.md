@@ -52,10 +52,10 @@ The verified representative-week slide states:
   EnergyPlus totals matched telemetry within numerical precision.
 <!-- END SLIDE_5_EVIDENCE -->
 
-The presentation build accepts an optional JSON file conforming to
-`tmp/presentation/week-metrics.schema.json`. It will populate week metrics only
-when the input declares a verified EnergyPlus 26.1 evaluation comparison and
-the referenced comparison artifact matches its SHA-256 checksum.
+The reviewed final deck is stored at
+`presentation/ecoloop-submission.pptx`. Its Slide 5 source note identifies the
+verified comparison artifact, the two run IDs, the calculation formulas, and
+the SHA-256 of the exact repository blob used for the claims.
 
 ## Slide 6 - Limits define the next step
 
@@ -66,10 +66,11 @@ the referenced comparison artifact matches its SHA-256 checksum.
 - Next: strengthen the energy/demand penalty and tune on additional weather
   periods, then commission a BACnet/MQTT adapter with site-level safeties.
 
-## Verified-results insertion contract
+## Verified-results update contract
 
-The accepted final deck is not produced by manually editing Slide 5. After the
-evaluation agent run completes:
+The temporary presentation-authoring workspace is intentionally excluded from
+the repository. To update the included final deck after a new verified
+evaluation:
 
 1. Generate the machine-readable comparison:
 
@@ -77,21 +78,25 @@ evaluation agent run completes:
    python -m ecoloop compare BASELINE_RUN_ID AGENT_RUN_ID --output-dir results
    ```
 
-2. Create the bounded presentation input from that `comparison.json` and the two
-   verified final-metrics exports.
-3. Record the repository-relative comparison path and its SHA-256.
-4. Build the accepted filename:
+2. Confirm that the comparison is verified for an EnergyPlus 26.1 evaluation
+   period, has no verification failures, and references distinct baseline and
+   agent run IDs.
+3. Read only the fields listed below from `results/comparison.json` and the two
+   verified final-metrics exports. Calculate changes from those values; never
+   transcribe a value from a screenshot or terminal capture.
+4. Compute the SHA-256 from the exact Git blob bytes that will be packaged, such
+   as the bytes returned by `git show <revision>:results/comparison.json`.
+   Avoid text-mode pipelines that can convert LF to CRLF before hashing.
+5. Update only the inherited Slide 5 evidence text and its `[Sources]` speaker
+   note in a standards-compliant presentation editor. Preserve the template
+   theme, slide geometry, all other slide content, and neutral document
+   metadata.
+6. Render and inspect every slide, compare all non-target visible content with
+   the prior reviewed deck, check for empty placeholders and clipping, verify
+   every source note, and then export the PDF with
+   `scripts/export_presentation_pdf.ps1`.
 
-   ```powershell
-   node tmp/presentation/build_ecoloop_draft.mjs `
-     --metrics <verified-json> `
-     --out presentation/ecoloop-submission.pptx
-   ```
-
-5. Re-run template fidelity, render, metadata, source-note, placeholder, and
-   restricted-trace checks before PDF conversion.
-
-The JSON maps only these fields into the inherited Slide 5 text frame:
+The bounded field contract for Slide 5 is:
 
 - baseline and agent facility electricity kWh;
 - baseline and agent HVAC electricity kWh;
@@ -100,10 +105,11 @@ The JSON maps only these fields into the inherited Slide 5 text frame:
 - baseline and agent PMV-compliance percent;
 - agent decision, timeout-attempt, and fallback counts.
 
-The builder calculates all relative or percentage-point changes. If the agent
-uses more electricity or reaches a higher peak, the deck says `higher`; it does
-not present the result as savings. Speaker notes must name both run IDs, the
-comparison artifact, its SHA-256, and the methodology/results sources.
+Calculate every relative or percentage-point change from those fields. If the
+agent uses more electricity or reaches a higher peak, the deck says `higher`;
+it does not present the result as savings. Speaker notes must name both run IDs,
+the comparison artifact, its canonical-blob SHA-256, and the
+methodology/results sources.
 
 Values are never copied from a screenshot, terminal transcript, or manually
 edited prose. If any gate fails, the pending block remains in the deck.
