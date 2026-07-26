@@ -9,9 +9,16 @@ uses a local Ollama model to select evaluated setpoint candidates, validates
 every decision through an independent deterministic safety layer, and applies
 supported thermostat schedule actuators through PyEnergyPlus.
 
-> Project status: active implementation and validation. Measured savings are not
-> published until compatible real baseline and controlled runs complete and pass
-> output cross-checks. See `docs/progress.md` and `docs/results.md`.
+<!-- BEGIN VERIFIED_EVALUATION_STATUS -->
+> Evidence status: the real actuator proof and one-day closed-loop acceptance
+> test are verified. The representative-week baseline is verified, while its
+> paired agent run is still being evaluated. No representative-week comparison
+> or savings claim is published yet.
+<!-- END VERIFIED_EVALUATION_STATUS -->
+
+Canonical run identities, measured values, and publication status live in
+[`docs/results.md`](docs/results.md). Implementation and test history live in
+[`docs/progress.md`](docs/progress.md).
 
 ## Why this matters
 
@@ -40,6 +47,19 @@ flowchart LR
 
 The complete callback, protocol, safety, replay, and security design is in
 [`docs/architecture.md`](docs/architecture.md).
+
+## Evidence at a glance
+
+- **Actuator proof:** a real EnergyPlus acceptance run changed active thermostat
+  schedule actuators and recorded a later physical response. It is not presented
+  as an agent-energy comparison.
+- **Closed-loop proof:** a real one-day run exercised EnergyPlus, SQLite, MCP
+  stdio, local inference, deterministic validation, actuation, and subsequent
+  telemetry. Its measured comfort/energy trade-off is reported without turning
+  it into a savings claim.
+- **Headline evaluation:** the configured representative week is published only
+  after both matched real runs complete and official totals pass telemetry and
+  provenance checks.
 
 ## Quick start
 
@@ -136,6 +156,19 @@ python -m ecoloop doctor
 The doctor command validates the EnergyPlus build, local model, weather, model,
 and writable artifact paths before any real demo starts.
 
+`python -m ecoloop demo` never enables fake mode. It runs the preflight checks,
+reuses or creates a verified demo-period baseline, starts the dashboard, launches
+the real controlled process, prints both run IDs and the local URL, and writes
+the controlled ID to `runs/current_run.txt`. The dashboard remains available
+after a clean run until Ctrl+C, which shuts down its child processes.
+
+For a recording-friendly pace without changing simulated time or calculated
+energy:
+
+```powershell
+uv run python -m ecoloop demo --display-delay-seconds 0.15
+```
+
 ## Commands
 
 ```text
@@ -195,12 +228,24 @@ submission/         reproducible submission package
 
 ## Screenshots
 
-Screenshots are intentionally added only after a real run exists.
+The repository keeps filenames stable so submission screenshots can be replaced
+without changing documentation links:
 
-- `docs/images/live-operations.png`: capture Live Operations during a real run or
-  clearly labelled replay.
-- `docs/images/baseline-vs-agent.png`: capture the compatible completed run pair.
-- `docs/images/decision-trace.png`: capture proposed/applied actions and tool trace.
+- `docs/images/live-operations.png`: capture **Live Operations** with the selected
+  evidence run ID, period, status, simulation clock, active setpoints, and latest
+  proposed/applied action visible.
+- `docs/images/baseline-vs-agent.png`: capture **Baseline vs Agent** only after
+  the dashboard displays `Compatible completed real runs.` for the selected
+  evaluation pair. Keep both run selectors and the compatibility banner visible.
+- `docs/images/decision-trace.png`: capture **Agent Decisions** with the selected
+  action, proposed-versus-applied values, safety outcome, reason code, latency,
+  and MCP trace visible.
+- `docs/images/reliability.png`: capture **Reliability and Errors** with timeout,
+  fallback, clamp, and EnergyPlus severity counts visible.
+
+Do not crop out the run identity or a `REAL RUN REPLAY` banner. If the matched
+week is incomplete, show the dashboard's honest incomplete status instead of
+substituting fake data or an unrelated period.
 
 ## Evaluation
 

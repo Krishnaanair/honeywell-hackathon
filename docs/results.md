@@ -6,6 +6,21 @@ This document is generated or updated only from completed, compatible real
 EnergyPlus runs. Fake, failed, incomplete, or mismatched cases are never used for
 published savings.
 
+## How to read the evidence
+
+EcoLoop separates three evidence levels so a successful integration test is not
+mistaken for a favorable energy result:
+
+1. **Actuator proof** confirms that a requested schedule value reaches the active
+   EnergyPlus simulation and is followed by later physical telemetry.
+2. **Closed-loop smoke** confirms the complete observation-to-action path,
+   including MCP, local inference, safety validation, actuation, and response.
+3. **Representative comparison** evaluates energy, peak, comfort, reliability,
+   cost, and carbon only for a matched completed baseline/agent pair.
+
+The sections below use different run cohorts. Values from an actuator proof are
+not combined with closed-loop or representative-week values.
+
 ## Verified one-day closed-loop smoke
 
 The strict real acceptance test completed on 2026-07-26 using EnergyPlus 26.1.0,
@@ -66,6 +81,7 @@ as agent savings.
 
 ## Representative-week status
 
+<!-- BEGIN VERIFIED_EVALUATION_BLOCK -->
 The compatible representative-week baseline
 `baseline-20260726T105124Z-4adce000` is complete and verified at:
 
@@ -79,6 +95,14 @@ The compatible representative-week baseline
 The paired local-model agent run is in progress. No representative-week savings
 or comparison is published until that run completes and passes the same
 official-output, telemetry, provenance, and compatibility checks.
+<!-- END VERIFIED_EVALUATION_BLOCK -->
+
+The marked block above is the deterministic publication boundary. Once the
+agent run completes, replace it only from the verified `comparison.json` and the
+two verified final-metrics exports produced by the commands below. Record both
+run IDs and the comparison artifact SHA-256 in the result narrative and
+presentation notes; do not transcribe values from terminal output or dashboard
+screenshots.
 
 Run:
 

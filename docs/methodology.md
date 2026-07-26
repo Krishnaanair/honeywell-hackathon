@@ -13,6 +13,22 @@ supervisory controller using identical EnergyPlus inputs. The evaluation asks:
 No metric is published until both real runs complete, use compatible inputs, and
 pass output integrity checks.
 
+## Publication states
+
+Publication follows the run state rather than the desired narrative:
+
+| Evidence state | Allowed communication | Prohibited communication |
+| --- | --- | --- |
+| Running, cancelled, or failed | Run identity, progress, and diagnostic status | Final totals, comparison, or savings |
+| Completed but unverified | Completion status and verification blockers | Production metrics or comparison |
+| Verified completed single run | That run's absolute official-output metrics | Relative savings or attribution to the controller |
+| Compatible verified baseline/agent pair | Absolute values, signed comparison, comfort, reliability, and provenance | Generalization beyond the configured model, weather, and period |
+| Replay | Reproduction of the recorded action sequence and resulting outputs | A second independent optimization result |
+
+The dashboard, reports, results document, and presentation use the same boundary.
+An unfavorable verified result is published with the same prominence as a
+favorable one.
+
 ## Building and weather
 
 The base is the expanded EnergyPlus 26.1.0
@@ -141,6 +157,10 @@ carbon_kg = sum(timestep_kWh * timestep_carbon_kg_per_kWh)
 ```
 
 Percent metrics are undefined when the baseline denominator is not positive.
+Positive `energy_saving_percent` and `peak_reduction_percent` values mean a
+reduction. Negative values mean the controlled case consumed more electricity
+or reached a higher peak; audience-facing reports describe that direction
+plainly rather than relabelling it as savings.
 
 Occupied temperature violation:
 
@@ -170,6 +190,24 @@ fallbacks, invalid actions, safety clamps, and EnergyPlus message severities.
 An agent observation may include the baseline value at the same simulated
 timestamp only after a compatible completed baseline exists. Alignment uses
 simulated timestamp and period identity, not row position or wall-clock time.
+
+## Dashboard and presentation extraction
+
+The dashboard comparison view hides fake and incomplete runs, requires a
+completed real baseline and controlled case, and checks EnergyPlus version,
+weather, period, model-preparation fingerprint, and verified final metrics before
+displaying a comparison. Cumulative curves align on simulated timestamp.
+
+The interim six-slide deck keeps its result frame visibly pending. Its verified
+build accepts a bounded JSON input that names the evaluation baseline and agent
+runs, points to a repository-local comparison artifact, and includes that
+artifact's SHA-256. The builder validates version, period, run identities,
+verification status, metric types/ranges, and checksum before inserting values;
+directional changes are calculated from the supplied absolute values.
+
+The source of truth remains the machine-readable EnergyPlus comparison export.
+Dashboard values and presentation copy are views of that evidence, not
+independent result sources.
 
 ## Interpretation
 
