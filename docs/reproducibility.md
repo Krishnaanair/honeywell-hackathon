@@ -112,3 +112,24 @@ Verify `submission/checksums.txt` against every packaged file and inspect
 virtual environments, model weights, installers, caches, and oversized raw
 temporary runs while retaining source, tests, lock file, models/replay, small
 verified exports, documentation, licences, and setup instructions.
+
+In a Git checkout, the packager enumerates indexed paths with fixed, non-shell
+Git commands and reads only those reviewed paths from the working tree. The only
+untracked additions it accepts are the completed
+`presentation/ecoloop-submission.pptx` and the named export files directly under
+`results/` (`action_schedule.csv`, `actuator_map.csv`, `agent_replay.idf`,
+`api_points.csv`, `comparison.csv`, `comparison.json`, `decisions.jsonl`,
+`metrics.csv`, `metrics.json`, and `telemetry.csv`). Run:
+
+```powershell
+python -m ecoloop export RUN_ID --output-dir results
+```
+
+An unpacked source distribution outside any Git checkout uses a restricted walk
+of known source directories. If the source is within a checkout but indexed
+paths cannot be enumerated, or the selected root is not that checkout's top
+level, packaging stops instead of falling back. Both modes reject symlinks,
+credential-like files or values, user-home paths, raw EnergyPlus output,
+weather data, model weights, installers, caches, archives, and files larger
+than 20 MiB. ZIP entry order, timestamps, and permissions are normalized for
+reproducible output.

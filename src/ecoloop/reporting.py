@@ -45,6 +45,303 @@ class PackagingError(RuntimeError):
     """Raised when a submission artifact cannot be generated honestly."""
 
 
+_SOURCE_ARCHIVE_MAX_BYTES = 20 * 1024 * 1024
+_SOURCE_ARCHIVE_GIT_TIMEOUT_SECONDS = 10.0
+_SOURCE_ARCHIVE_FALLBACK_DIRECTORIES = (
+    ".github",
+    "config",
+    "docs",
+    "models",
+    "scripts",
+    "src",
+    "tests",
+    "weather",
+)
+_SOURCE_ARCHIVE_FALLBACK_FILES = (
+    ".env.example",
+    ".gitignore",
+    "AGENTS.md",
+    "LICENSE",
+    "Makefile",
+    "README.md",
+    "THIRD_PARTY_NOTICES.md",
+    "pyproject.toml",
+    "uv.lock",
+)
+_SOURCE_ARCHIVE_GENERATED_PATHS = frozenset(
+    {
+        "presentation/ecoloop-submission.pptx",
+        "results/action_schedule.csv",
+        "results/actuator_map.csv",
+        "results/agent_replay.idf",
+        "results/api_points.csv",
+        "results/comparison.csv",
+        "results/comparison.json",
+        "results/decisions.jsonl",
+        "results/metrics.csv",
+        "results/metrics.json",
+        "results/telemetry.csv",
+    }
+)
+_SOURCE_ARCHIVE_PRESENTATION_PATHS = frozenset(
+    {
+        "presentation/ecoloop-submission.pptx",
+        "presentation/template.pptx",
+    }
+)
+_SOURCE_ARCHIVE_REQUIRED_PATHS = frozenset(
+    {
+        ".env.example",
+        ".github/workflows/ci.yml",
+        ".gitignore",
+        "AGENTS.md",
+        "LICENSE",
+        "Makefile",
+        "README.md",
+        "THIRD_PARTY_NOTICES.md",
+        "config/default.toml",
+        "docs/architecture.md",
+        "docs/control-policy.md",
+        "docs/demo-script.md",
+        "docs/implementation-plan.md",
+        "docs/limitations.md",
+        "docs/methodology.md",
+        "docs/presentation-content.md",
+        "docs/progress.md",
+        "docs/prompt-engineering.md",
+        "docs/reproducibility.md",
+        "docs/results.md",
+        "docs/troubleshooting.md",
+        "models/base/ENERGYPLUS_LICENSE.txt",
+        "models/base/PROVENANCE.json",
+        "models/base/SOURCE.md",
+        "models/base/building.idf",
+        "models/generated/action_schedule.csv",
+        "models/generated/actuator_map.csv",
+        "models/generated/agent_ready.idf",
+        "models/generated/agent_replay.idf",
+        "models/generated/baseline.idf",
+        "models/generated/preparation-manifest.json",
+        "pyproject.toml",
+        "scripts/install_weather.py",
+        "src/ecoloop/__init__.py",
+        "tests/integration/test_mcp_stdio.py",
+        "tests/unit/test_safety.py",
+        "uv.lock",
+        "weather/README.md",
+        "weather/SOURCE.md",
+    }
+)
+_SOURCE_ARCHIVE_EXCLUDED_ROOTS = frozenset({".git", "runs", "submission", "tmp"})
+_SOURCE_ARCHIVE_EXCLUDED_DIRECTORIES = frozenset(
+    {
+        ".aws",
+        ".azure",
+        ".cache",
+        ".git",
+        ".gnupg",
+        ".idea",
+        ".mypy_cache",
+        ".nox",
+        ".pytest_cache",
+        ".ruff_cache",
+        ".ssh",
+        ".tox",
+        ".venv",
+        ".vscode",
+        ".virtualenv",
+        "__pycache__",
+        "build",
+        "dist",
+        "env",
+        "htmlcov",
+        "node_modules",
+        "site-packages",
+        "tmp",
+        "venv",
+    }
+)
+_SOURCE_ARCHIVE_EXCLUDED_FILES = frozenset(
+    {
+        ".coverage",
+        ".ds_store",
+        ".npmrc",
+        ".pypirc",
+        "desktop.ini",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+        "id_rsa",
+        "known_hosts",
+        "thumbs.db",
+    }
+)
+_SOURCE_ARCHIVE_EXCLUDED_SUFFIXES = frozenset(
+    {
+        ".7z",
+        ".apk",
+        ".appx",
+        ".bak",
+        ".bin",
+        ".bz2",
+        ".class",
+        ".ckpt",
+        ".code-workspace",
+        ".crt",
+        ".db",
+        ".deb",
+        ".ddy",
+        ".dmg",
+        ".dll",
+        ".docm",
+        ".docx",
+        ".dylib",
+        ".epw",
+        ".eso",
+        ".exe",
+        ".gguf",
+        ".gz",
+        ".h5",
+        ".hdf5",
+        ".iso",
+        ".jar",
+        ".joblib",
+        ".key",
+        ".kdbx",
+        ".lib",
+        ".msi",
+        ".msix",
+        ".mtr",
+        ".npy",
+        ".npz",
+        ".o",
+        ".obj",
+        ".onnx",
+        ".otf",
+        ".p12",
+        ".pem",
+        ".pfx",
+        ".pkg",
+        ".pkl",
+        ".pickle",
+        ".pt",
+        ".pth",
+        ".pyc",
+        ".pyd",
+        ".pyo",
+        ".rar",
+        ".rpm",
+        ".safetensors",
+        ".so",
+        ".sqlite",
+        ".sqlite3",
+        ".stat",
+        ".swo",
+        ".swp",
+        ".tar",
+        ".tbz2",
+        ".tgz",
+        ".tmp",
+        ".ttf",
+        ".war",
+        ".whl",
+        ".xlsm",
+        ".xlsx",
+        ".xz",
+        ".zip",
+        ".zst",
+    }
+)
+_SOURCE_ARCHIVE_TEXT_SUFFIXES = frozenset(
+    {
+        "",
+        ".cfg",
+        ".csv",
+        ".example",
+        ".idf",
+        ".ini",
+        ".json",
+        ".jsonl",
+        ".lock",
+        ".md",
+        ".mmd",
+        ".ps1",
+        ".py",
+        ".sh",
+        ".sql",
+        ".svg",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+    }
+)
+_SOURCE_ARCHIVE_SECRET_FILENAME = re.compile(
+    r"(?i)^(?:"
+    r"credentials?(?:[._-].*)?|"
+    r"secrets?(?:[._-].*)?|"
+    r"tokens?(?:[._-].*)?|"
+    r"service[-_]?accounts?(?:[._-].*)?|"
+    r".*private[-_]?keys?.*"
+    r")$"
+)
+_SOURCE_ARCHIVE_ENERGYPLUS_OUTPUT = re.compile(
+    r"(?i)^(?:eplus(?:out|mtr|ssz|zsz|tbl).*|readvars\.audit|sqlite\.err)$"
+)
+_SOURCE_ARCHIVE_USER_HOME = re.compile(
+    r"(?i)(?:[a-z]:[\\/]+users[\\/]+|/(?:home|users)/)"
+    r"(?P<username>[^\\/\s\"'<>]+)"
+)
+_SOURCE_ARCHIVE_PLACEHOLDER_USERS = frozenset(
+    {
+        "example",
+        "sample",
+        "user",
+        "username",
+        "your-user",
+        "your_username",
+    }
+)
+_SOURCE_ARCHIVE_SENSITIVE_CONTENT = (
+    (
+        "private-key material",
+        re.compile(r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----"),
+    ),
+    (
+        "repository access token",
+        re.compile(
+            r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+            r"glpat-[A-Za-z0-9_-]{20,})\b"
+        ),
+    ),
+    (
+        "cloud access token",
+        re.compile(
+            r"\b(?:A(?:KI|SI)A[0-9A-Z]{16}|AIza[0-9A-Za-z_-]{35}|"
+            r"xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,})\b"
+        ),
+    ),
+    (
+        "authorization bearer value",
+        re.compile(r"(?i)\bauthorization\s*[:=]\s*[\"']?bearer\s+[A-Za-z0-9._-]{12,}"),
+    ),
+    (
+        "credential-bearing URL",
+        re.compile(r"https?://[^/\s:@]+:[^@\s/]+@"),
+    ),
+    (
+        "assigned credential value",
+        re.compile(
+            r"(?i)\b(?:api[-_]?key|access[-_]?token|password|client[-_]?secret|"
+            r"private[-_]?key|aws[-_]?secret[-_]?access[-_]?key)\b"
+            r"\s*[:=]\s*[\"']?[^\"'\s,;}]{8,}"
+        ),
+    ),
+)
+_SOURCE_ARCHIVE_PPTX_TEXT_ENTRY_MAX_BYTES = 5 * 1024 * 1024
+_SOURCE_ARCHIVE_PPTX_TEXT_TOTAL_MAX_BYTES = 20 * 1024 * 1024
+
+
 def sha256_file(path: Path) -> str:
     """Return the lowercase SHA-256 digest for a file."""
 
@@ -489,156 +786,291 @@ def _clear_stale_submission_artifacts(submission: Path) -> None:
 
 
 def _write_source_zip(root: Path, output: Path) -> None:
-    source_directories = (
-        ".github",
-        "config",
-        "docs",
-        "models",
-        "presentation",
-        "results",
-        "scripts",
-        "src",
-        "tests",
-        "weather",
-    )
-    source_files = (
-        ".env.example",
-        ".gitignore",
-        "AGENTS.md",
-        "LICENSE",
-        "Makefile",
-        "README.md",
-        "THIRD_PARTY_NOTICES.md",
-        "pyproject.toml",
-        "uv.lock",
-    )
-    excluded_directories = {
-        "__pycache__",
-        ".cache",
-        ".idea",
-        ".mypy_cache",
-        ".pytest_cache",
-        ".ruff_cache",
-        ".vscode",
-        "build",
-        "dist",
-        "htmlcov",
-        "tmp",
-        "venv",
-    }
-    excluded_files = {
-        ".coverage",
-        ".npmrc",
-        ".pypirc",
-        "credentials",
-        "credentials.json",
-        "eplusout.eso",
-        "eplusout.mtr",
-        "id_ed25519",
-        "id_rsa",
-        "service-account.json",
-    }
-    excluded_suffixes = {
-        ".7z",
-        ".bin",
-        ".crt",
-        ".ddy",
-        ".dmg",
-        ".dll",
-        ".epw",
-        ".eso",
-        ".exe",
-        ".gguf",
-        ".gz",
-        ".key",
-        ".kdbx",
-        ".msi",
-        ".mtr",
-        ".onnx",
-        ".p12",
-        ".pem",
-        ".pfx",
-        ".pkg",
-        ".pt",
-        ".pth",
-        ".safetensors",
-        ".so",
-        ".stat",
-        ".tar",
-        ".tgz",
-        ".xz",
-        ".zip",
-    }
-    candidates = [root / name for name in source_files]
-    for directory_name in source_directories:
-        directory = root / directory_name
-        if directory.is_dir():
-            candidates.extend(directory.rglob("*"))
+    """Write a deterministic, reviewed source archive.
 
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(set(candidates)):
-            if path.is_symlink():
-                continue
-            if not path.is_file():
-                continue
-            relative = path.relative_to(root)
-            if any(part in excluded_directories for part in relative.parts):
-                continue
-            if path.name in excluded_files:
-                continue
-            if path.name.startswith(".env") and path.name != ".env.example":
-                continue
-            if path.suffix.casefold() in excluded_suffixes:
-                continue
-            if path.stat().st_size > 20 * 1024 * 1024:
-                continue
-            archive.write(path, relative.as_posix())
-    with zipfile.ZipFile(output) as archive:
-        names = set(archive.namelist())
-    required = {
-        "README.md",
-        "pyproject.toml",
-        "uv.lock",
-        "LICENSE",
-        "THIRD_PARTY_NOTICES.md",
-        ".env.example",
-        ".gitignore",
-        ".github/workflows/ci.yml",
-        "AGENTS.md",
-        "Makefile",
-        "config/default.toml",
-        "scripts/install_weather.py",
-        "src/ecoloop/__init__.py",
-        "tests/unit/test_safety.py",
-        "tests/integration/test_mcp_stdio.py",
-        "models/base/building.idf",
-        "models/base/ENERGYPLUS_LICENSE.txt",
-        "models/base/PROVENANCE.json",
-        "models/base/SOURCE.md",
-        "models/generated/baseline.idf",
-        "models/generated/agent_ready.idf",
-        "models/generated/agent_replay.idf",
-        "models/generated/action_schedule.csv",
-        "models/generated/actuator_map.csv",
-        "models/generated/preparation-manifest.json",
-        "docs/architecture.md",
-        "docs/control-policy.md",
-        "docs/demo-script.md",
-        "docs/implementation-plan.md",
-        "docs/limitations.md",
-        "docs/methodology.md",
-        "docs/presentation-content.md",
-        "docs/progress.md",
-        "docs/prompt-engineering.md",
-        "docs/reproducibility.md",
-        "docs/results.md",
-        "docs/troubleshooting.md",
-        "weather/README.md",
-        "weather/SOURCE.md",
-    }
-    missing = required - names
+    A Git checkout contributes only paths recorded in its index. Exact result
+    exports and the completed presentation may be added without tracking so a
+    final evidence bundle can be assembled without committing run data. A
+    source tree without its own Git metadata uses a restricted directory walk;
+    this supports unpacked source distributions while retaining every archive
+    safety check.
+    """
+
+    resolved_root = root.expanduser().resolve()
+    resolved_output = output.expanduser().resolve()
+    if not resolved_root.is_dir():
+        raise PackagingError(f"source archive root is not a directory: {resolved_root}")
+    resolved_output.parent.mkdir(parents=True, exist_ok=True)
+    resolved_output.unlink(missing_ok=True)
+
+    candidates = _source_archive_candidates(resolved_root)
+    entries = _source_archive_entries(resolved_root, candidates)
+    names = {name for name, _ in entries}
+    missing = _SOURCE_ARCHIVE_REQUIRED_PATHS - names
     if missing:
         raise PackagingError(f"source ZIP is missing required files: {sorted(missing)}")
+
+    try:
+        with zipfile.ZipFile(
+            resolved_output,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+        ) as archive:
+            for name, path in entries:
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.create_system = 3
+                mode = 0o100755 if path.suffix.casefold() == ".sh" else 0o100644
+                info.external_attr = mode << 16
+                archive.writestr(
+                    info,
+                    path.read_bytes(),
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
+    except (OSError, RuntimeError, zipfile.BadZipFile):
+        resolved_output.unlink(missing_ok=True)
+        raise
+
+
+def _source_archive_candidates(root: Path) -> dict[Path, str | None]:
+    tracked = _git_tracked_files(root)
+    candidates: dict[Path, str | None] = (
+        _fallback_source_archive_candidates(root) if tracked is None else dict(tracked)
+    )
+    for value in _SOURCE_ARCHIVE_GENERATED_PATHS:
+        relative = Path(value)
+        if (root / relative).exists():
+            candidates.setdefault(relative, None)
+    return candidates
+
+
+def _git_tracked_files(root: Path) -> dict[Path, str] | None:
+    """Return Git-indexed paths and modes, or ``None`` outside a Git checkout."""
+
+    has_git_metadata = any(
+        (directory / ".git").exists() or (directory / ".git").is_symlink()
+        for directory in (root, *root.parents)
+    )
+    commands = (
+        ["git", "rev-parse", "--show-toplevel"],
+        ["git", "ls-files", "--cached", "--stage", "-z"],
+    )
+    completed: list[subprocess.CompletedProcess[bytes]] = []
+    for command in commands:
+        try:
+            result = subprocess.run(  # noqa: S603
+                command,
+                cwd=root,
+                check=False,
+                capture_output=True,
+                shell=False,
+                timeout=_SOURCE_ARCHIVE_GIT_TIMEOUT_SECONDS,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            if has_git_metadata:
+                raise PackagingError(
+                    "Git metadata exists, but tracked source files could not be enumerated safely."
+                ) from exc
+            return None
+        completed.append(result)
+        if result.returncode != 0:
+            if has_git_metadata:
+                raise PackagingError(
+                    "Git metadata exists, but tracked source files could not be enumerated safely."
+                )
+            return None
+
+    top_level_bytes = completed[0].stdout.rstrip(b"\r\n")
+    top_level = Path(os.fsdecode(top_level_bytes)).expanduser().resolve()
+    if top_level != root:
+        raise PackagingError("source archive root must be the top level of its Git checkout")
+
+    tracked: dict[Path, str] = {}
+    for record in completed[1].stdout.split(b"\0"):
+        if not record:
+            continue
+        header, separator, raw_path = record.partition(b"\t")
+        fields = header.split()
+        if not separator or len(fields) != 3:
+            raise PackagingError("Git returned a malformed tracked-file record.")
+        mode = fields[0].decode("ascii", errors="strict")
+        stage = fields[2].decode("ascii", errors="strict")
+        if stage != "0":
+            raise PackagingError("Git has unresolved index entries; source packaging is blocked.")
+        relative = Path(os.fsdecode(raw_path))
+        tracked[relative] = mode
+    return tracked
+
+
+def _fallback_source_archive_candidates(root: Path) -> dict[Path, str | None]:
+    """Collect a constrained source set when no checkout metadata exists."""
+
+    candidates: dict[Path, str | None] = {}
+    for value in _SOURCE_ARCHIVE_FALLBACK_FILES:
+        relative = Path(value)
+        if (root / relative).exists():
+            candidates[relative] = None
+    for directory_name in _SOURCE_ARCHIVE_FALLBACK_DIRECTORIES:
+        directory = root / directory_name
+        if not directory.is_dir():
+            continue
+        for path in directory.rglob("*"):
+            candidates[path.relative_to(root)] = None
+    template = Path("presentation/template.pptx")
+    if (root / template).exists():
+        candidates[template] = None
+    return candidates
+
+
+def _source_archive_entries(
+    root: Path,
+    candidates: Mapping[Path, str | None],
+) -> list[tuple[str, Path]]:
+    entries: list[tuple[str, Path]] = []
+    casefolded_names: dict[str, str] = {}
+    for relative, git_mode in sorted(candidates.items(), key=lambda item: item[0].as_posix()):
+        violation = _source_archive_path_violation(root, relative, git_mode)
+        if violation is not None:
+            continue
+        path = root / relative
+        name = relative.as_posix()
+        content_violation = _source_archive_content_violation(path, root)
+        if content_violation is not None:
+            raise PackagingError(
+                f"source packaging blocked for {name}: {content_violation}; "
+                "remove or sanitize the file"
+            )
+        folded = name.casefold()
+        existing = casefolded_names.get(folded)
+        if existing is not None and existing != name:
+            raise PackagingError(
+                f"source packaging has case-conflicting paths: {existing!r} and {name!r}"
+            )
+        casefolded_names[folded] = name
+        entries.append((name, path))
+    return entries
+
+
+def _source_archive_path_violation(
+    root: Path,
+    relative: Path,
+    git_mode: str | None,
+) -> str | None:
+    if git_mode == "120000":
+        return "Git symlink"
+    if relative.is_absolute() or relative.drive or ".." in relative.parts:
+        return "unsafe path"
+    name = relative.as_posix()
+    if not name or "\\" in name or ":" in relative.parts[0]:
+        return "unsafe path"
+    folded_parts = tuple(part.casefold() for part in relative.parts)
+    if folded_parts[0] in _SOURCE_ARCHIVE_EXCLUDED_ROOTS:
+        return "runtime or package output"
+    if any(
+        part in _SOURCE_ARCHIVE_EXCLUDED_DIRECTORIES or part.endswith((".dist-info", ".egg-info"))
+        for part in folded_parts
+    ):
+        return "cache or environment directory"
+    if folded_parts[0] == "results" and name not in _SOURCE_ARCHIVE_GENERATED_PATHS:
+        return "unapproved result artifact"
+
+    path = root / relative
+    folded_filename = path.name.casefold()
+    if folded_filename in _SOURCE_ARCHIVE_EXCLUDED_FILES:
+        return "sensitive local file"
+    if folded_filename.startswith(".env") and name != ".env.example":
+        return "local environment file"
+    if _SOURCE_ARCHIVE_SECRET_FILENAME.fullmatch(path.name):
+        return "credential-like filename"
+    if _SOURCE_ARCHIVE_ENERGYPLUS_OUTPUT.fullmatch(path.name):
+        return "raw EnergyPlus output"
+    suffix = path.suffix.casefold()
+    if suffix == ".pptx" and name not in _SOURCE_ARCHIVE_PRESENTATION_PATHS:
+        return "unapproved presentation archive"
+    if suffix in _SOURCE_ARCHIVE_EXCLUDED_SUFFIXES:
+        return "binary, weather, model, installer, or archive suffix"
+    if path.is_symlink():
+        return "filesystem symlink"
+
+    current = root
+    for part in relative.parts:
+        current /= part
+        if current.is_symlink():
+            return "filesystem symlink"
+    if not path.is_file():
+        return "not a regular file"
+    try:
+        resolved_path = path.resolve(strict=True)
+        resolved_path.relative_to(root)
+        size = path.stat().st_size
+    except (OSError, ValueError):
+        return "unreadable or escaped path"
+    if size > _SOURCE_ARCHIVE_MAX_BYTES:
+        return "oversized file"
+    return None
+
+
+def _source_archive_content_violation(path: Path, root: Path) -> str | None:
+    fragments, read_violation = _source_archive_text_fragments(path)
+    if read_violation is not None:
+        return read_violation
+    for text in fragments:
+        for label, pattern in _SOURCE_ARCHIVE_SENSITIVE_CONTENT:
+            if pattern.search(text):
+                return label
+        if _contains_host_specific_path(text, root):
+            return "host-specific path"
+    return None
+
+
+def _source_archive_text_fragments(path: Path) -> tuple[tuple[str, ...], str | None]:
+    if path.suffix.casefold() == ".pptx":
+        return _presentation_text_fragments(path)
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return (), "unreadable file"
+    if path.suffix.casefold() not in _SOURCE_ARCHIVE_TEXT_SUFFIXES and b"\0" in data[:8192]:
+        return (data.decode("latin-1", errors="ignore"),), None
+    return (data.decode("utf-8", errors="replace"),), None
+
+
+def _presentation_text_fragments(path: Path) -> tuple[tuple[str, ...], str | None]:
+    fragments: list[str] = []
+    total_size = 0
+    try:
+        with zipfile.ZipFile(path) as archive:
+            for info in sorted(archive.infolist(), key=lambda item: item.filename):
+                is_text_entry = info.filename.casefold().endswith((".xml", ".rels", ".txt"))
+                if info.is_dir() or not is_text_entry:
+                    continue
+                if info.file_size > _SOURCE_ARCHIVE_PPTX_TEXT_ENTRY_MAX_BYTES:
+                    return (), "oversized presentation metadata"
+                total_size += info.file_size
+                if total_size > _SOURCE_ARCHIVE_PPTX_TEXT_TOTAL_MAX_BYTES:
+                    return (), "oversized presentation metadata"
+                fragments.append(archive.read(info).decode("utf-8", errors="replace"))
+    except (OSError, RuntimeError, NotImplementedError, zipfile.BadZipFile):
+        return (), "invalid or unreadable presentation archive"
+    return tuple(fragments), None
+
+
+def _contains_host_specific_path(text: str, root: Path) -> bool:
+    folded_text = text.casefold()
+    root_values = {
+        str(root),
+        root.as_posix(),
+        str(root).replace("\\", "\\\\"),
+    }
+    if any(len(value) > 3 and value.casefold() in folded_text for value in root_values):
+        return True
+    for match in _SOURCE_ARCHIVE_USER_HOME.finditer(text):
+        username = match.group("username").casefold()
+        if username not in _SOURCE_ARCHIVE_PLACEHOLDER_USERS:
+            return True
+    return False
 
 
 @contextmanager
