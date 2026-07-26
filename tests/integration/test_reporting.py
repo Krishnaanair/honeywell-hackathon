@@ -1,8 +1,10 @@
 """Integration tests for honest run export and PDF packaging primitives."""
 
+import csv
+import json
 import subprocess
 import zipfile
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,7 @@ from pypdf import PdfReader
 import ecoloop.reporting as reporting
 from ecoloop.config import repository_root
 from ecoloop.db.store import SQLiteStore
+from ecoloop.exceptions import RunStateError
 from ecoloop.reporting import (
     PackagingError,
     _clear_stale_submission_artifacts,
@@ -18,7 +21,8 @@ from ecoloop.reporting import (
     export_run,
     render_text_pdf,
 )
-from ecoloop.schemas import RunType
+from ecoloop.schemas import RunStatus, RunType, ValidationResult
+from tests.unit._factories import NOW, action, candidate, observation_input
 
 
 def _write_fixture(root: Path, relative: str, content: str = "fixture\n") -> Path:
@@ -119,6 +123,158 @@ def test_export_run_is_idempotent_when_comparison_is_already_in_export_directory
     assert output == export_directory.resolve()
     assert comparison_json.read_text(encoding="utf-8") == '{"status":"verified"}\n'
     assert comparison_csv.read_text(encoding="utf-8") == "status\nverified\n"
+
+
+def test_export_run_writes_exact_replay_inputs_from_immutable_real_run(
+    tmp_path: Path,
+) -> None:
+    run_id = "real-agent-export"
+    runs_directory = tmp_path / "runs"
+    run_directory = runs_directory / run_id
+    input_directory = run_directory / "inputs"
+    energyplus_directory = run_directory / "energyplus"
+    input_directory.mkdir(parents=True)
+    energyplus_directory.mkdir()
+    model = input_directory / "agent_ready.idf"
+    actuator_map = input_directory / "actuator_map.csv"
+    api_points = energyplus_directory / "api_points.csv"
+    model.write_text("Version,26.1;\n", encoding="utf-8")
+    actuator_map.write_text(
+        "logical_action,component_type,control_type,actuator_key,required\n"
+        "heating_setpoint,Schedule:Compact,Schedule Value,Heat Schedule,true\n",
+        encoding="utf-8",
+    )
+    api_points.write_text(
+        "what,name,key,type,unit\nActuator,Schedule:Compact,Heat Schedule,Schedule Value,C\n",
+        encoding="utf-8",
+    )
+
+    database = runs_directory / "ecoloop.db"
+    store = SQLiteStore(database, clock=lambda: NOW)
+    store.create_run(
+        run_id,
+        RunType.AGENT,
+        is_fake=False,
+        energyplus_version="26.1.0",
+        model_path=model,
+        period_name="smoke",
+        timestamp=NOW,
+    )
+    store.set_run_status(run_id, RunStatus.RUNNING, timestamp=NOW)
+    observed = store.record_observation(
+        observation_input(
+            run_id=run_id,
+            simulation_timestamp=NOW,
+            timestep_key="real-export-step-1",
+        )
+    )
+    applied = candidate(
+        candidate_id="exported-safe-candidate",
+        heating_setpoint_c=20.5,
+        cooling_setpoint_c=24.5,
+        hold_minutes=60,
+    )
+    proposal = action(
+        action_id="exported-action-1",
+        run_id=run_id,
+        observation_id=observed.observation_id,
+        timestamp=NOW + timedelta(minutes=5),
+        expires_at=NOW + timedelta(hours=1),
+        action=applied,
+    )
+    validation = ValidationResult(
+        run_id=run_id,
+        observation_id=observed.observation_id,
+        action_generation=1,
+        timestamp=NOW + timedelta(minutes=5),
+        accepted=True,
+        proposed_action=applied,
+        applied_action=applied,
+        applied_expires_at=NOW + timedelta(hours=1),
+    )
+    application = store.apply_validated_action(
+        proposal,
+        validation,
+        expected_run_id=run_id,
+        timestamp=NOW + timedelta(minutes=5),
+    )
+    assert application.applied
+    store.set_run_status(run_id, RunStatus.COMPLETED, timestamp=NOW + timedelta(hours=1))
+    store.record_artifact(
+        run_id,
+        "energyplus_api_points",
+        api_points,
+        timestamp=NOW + timedelta(hours=1),
+    )
+    store.upsert_metric(
+        run_id,
+        "final_run_metrics",
+        value_json={
+            "source_artifacts": [
+                str(api_points.resolve()),
+                str((tmp_path / "external" / "eplusout.sql").resolve()),
+            ],
+            "status": "completed",
+        },
+        source="official-results-test",
+        verified=True,
+        timestamp=NOW + timedelta(hours=1),
+    )
+
+    output = export_run(database, runs_directory, run_id)
+
+    with (output / "action_schedule.csv").open(encoding="utf-8", newline="") as handle:
+        schedule = list(csv.DictReader(handle))
+    assert len(schedule) == 1
+    assert (
+        datetime.fromisoformat(schedule[0].pop("simulation_timestamp").replace("Z", "+00:00"))
+        == NOW
+    )
+    assert schedule == [
+        {
+            "observation_id": str(observed.observation_id),
+            "action_generation": "1",
+            "heating_setpoint_c": "20.5",
+            "cooling_setpoint_c": "24.5",
+            "hold_minutes": "60",
+        }
+    ]
+    assert (output / "agent_replay.idf").read_bytes() == model.read_bytes()
+    assert (output / "actuator_map.csv").read_bytes() == actuator_map.read_bytes()
+    assert (output / "api_points.csv").read_bytes() == api_points.read_bytes()
+    manifest = json.loads((output / "export-manifest.json").read_text(encoding="utf-8"))
+    assert manifest["replay_action_count"] == 1
+    assert manifest["replay_ready"] is True
+    assert manifest["missing_controlled_artifacts"] == []
+    assert manifest["energyplus_output_preserved"] is True
+    metrics_json = json.loads((output / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics_json["final_run_metrics"]["value_json"]["source_artifacts"] == [
+        "run/energyplus/api_points.csv",
+        "external/eplusout.sql",
+    ]
+    with (output / "metrics.csv").open(encoding="utf-8", newline="") as handle:
+        metric_rows = {row["metric_name"]: row for row in csv.DictReader(handle)}
+    assert json.loads(metric_rows["final_run_metrics"]["value_json"])["source_artifacts"] == [
+        "run/energyplus/api_points.csv",
+        "external/eplusout.sql",
+    ]
+    host_root = str(tmp_path.resolve())
+    for path in output.iterdir():
+        if path.suffix.casefold() in {".csv", ".idf", ".json", ".jsonl"}:
+            assert host_root not in path.read_text(encoding="utf-8")
+
+
+def test_export_run_rejects_run_id_path_traversal_before_creating_output(
+    tmp_path: Path,
+) -> None:
+    runs_directory = tmp_path / "runs"
+    database = runs_directory / "ecoloop.db"
+    SQLiteStore(database)
+
+    with pytest.raises(RunStateError, match="safe path component"):
+        export_run(database, runs_directory, "../escaped")
+
+    assert not (tmp_path / "escaped").exists()
 
 
 def test_source_zip_uses_release_allowlist_and_excludes_runtime_data(tmp_path):

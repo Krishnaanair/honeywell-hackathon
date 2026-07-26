@@ -14,7 +14,7 @@ import zipfile
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from pypdf import PdfReader
@@ -361,11 +361,20 @@ def export_run(
 ) -> Path:
     """Export one durable run without fabricating unavailable artifacts."""
 
+    if (
+        not run_id
+        or run_id in {".", ".."}
+        or "\x00" in run_id
+        or "/" in run_id
+        or "\\" in run_id
+        or Path(run_id).name != run_id
+    ):
+        raise RunStateError("run_id must be one safe path component")
     database = database_path.expanduser().resolve()
+    runs_root = runs_dir.expanduser().resolve()
+    run_directory = runs_root / run_id
     destination = (
-        output_dir.expanduser().resolve()
-        if output_dir is not None
-        else (runs_dir.expanduser().resolve() / run_id / "export")
+        output_dir.expanduser().resolve() if output_dir is not None else (run_directory / "export")
     )
     destination.mkdir(parents=True, exist_ok=True)
     with _connection(database) as connection:
@@ -377,7 +386,14 @@ def export_run(
             run_payload["data_status"] = "EXPLICIT_TEST_FAKE"
         else:
             run_payload["data_status"] = "REAL"
-        _write_json(destination / "run.json", run_payload)
+        _write_json(
+            destination / "run.json",
+            _portable_export_value(
+                run_payload,
+                runs_root=runs_root,
+                run_directory=run_directory,
+            ),
+        )
         _export_table_csv(
             connection,
             destination / "telemetry.csv",
@@ -404,21 +420,39 @@ def export_run(
             """,
             (run_id,),
         )
-        _export_table_csv(
-            connection,
-            destination / "action_schedule.csv",
+        action_rows = connection.execute(
             """
-            SELECT timestamp, observation_id, action_generation,
-                   json_extract(applied_values_json, '$.heating_setpoint_c')
+            SELECT observations.simulation_timestamp,
+                   applied_actions.observation_id,
+                   applied_actions.action_generation,
+                   json_extract(applied_actions.applied_values_json, '$.heating_setpoint_c')
                        AS heating_setpoint_c,
-                   json_extract(applied_values_json, '$.cooling_setpoint_c')
+                   json_extract(applied_actions.applied_values_json, '$.cooling_setpoint_c')
                        AS cooling_setpoint_c,
-                   expiry, fallback_status, reason_code
+                   json_extract(applied_actions.applied_values_json, '$.hold_minutes')
+                       AS hold_minutes
             FROM applied_actions
-            WHERE run_id = ?
-            ORDER BY action_generation
+            JOIN observations
+              ON observations.run_id = applied_actions.run_id
+             AND observations.observation_id = applied_actions.observation_id
+            WHERE applied_actions.run_id = ?
+            ORDER BY observations.simulation_timestamp,
+                     applied_actions.action_generation,
+                     applied_actions.observation_id
             """,
             (run_id,),
+        ).fetchall()
+        _write_csv(
+            destination / "action_schedule.csv",
+            [dict(row) for row in action_rows],
+            fieldnames=[
+                "simulation_timestamp",
+                "observation_id",
+                "action_generation",
+                "heating_setpoint_c",
+                "cooling_setpoint_c",
+                "hold_minutes",
+            ],
         )
         metric_rows = connection.execute(
             """
@@ -429,9 +463,28 @@ def export_run(
             """,
             (run_id,),
         ).fetchall()
+        portable_metric_rows: list[dict[str, Any]] = []
+        portable_metric_values: dict[str, Any] = {}
+        for row in metric_rows:
+            row_payload = dict(row)
+            parsed_value = _try_json(row_payload["value_json"])
+            portable_value = _portable_export_value(
+                parsed_value,
+                runs_root=runs_root,
+                run_directory=run_directory,
+            )
+            if row_payload["value_json"] is not None:
+                row_payload["value_json"] = json.dumps(
+                    portable_value,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+            portable_metric_rows.append(row_payload)
+            portable_metric_values[str(row["metric_name"])] = portable_value
         _write_csv(
             destination / "metrics.csv",
-            [dict(row) for row in metric_rows],
+            portable_metric_rows,
             fieldnames=[
                 "metric_name",
                 "value",
@@ -445,7 +498,7 @@ def export_run(
         metrics_json = {
             str(row["metric_name"]): {
                 "value": row["value"],
-                "value_json": _try_json(row["value_json"]),
+                "value_json": portable_metric_values[str(row["metric_name"])],
                 "units": row["units"],
                 "source": row["source"],
                 "verified": bool(row["verified"]),
@@ -454,17 +507,6 @@ def export_run(
             for row in metric_rows
         }
         _write_json(destination / "metrics.json", metrics_json)
-        _export_table_csv(
-            connection,
-            destination / "actuator_map.csv",
-            """
-            SELECT artifact_type, path, sha256, metadata_json
-            FROM run_artifacts
-            WHERE run_id = ? AND artifact_type IN ('actuator_map', 'handle_registry')
-            ORDER BY artifact_type, path
-            """,
-            (run_id,),
-        )
         artifacts = connection.execute(
             """
             SELECT artifact_type, path, sha256, size_bytes, metadata_json
@@ -485,19 +527,19 @@ def export_run(
             continue
         if artifact["artifact_type"] in {
             "api_points",
+            "energyplus_api_points",
             "actuator_map",
             "comparison_csv",
             "comparison_json",
             "replay_model",
-            "action_schedule",
         }:
             target_name = {
                 "api_points": "api_points.csv",
+                "energyplus_api_points": "api_points.csv",
                 "actuator_map": "actuator_map.csv",
                 "comparison_csv": "comparison.csv",
                 "comparison_json": "comparison.json",
                 "replay_model": "agent_replay.idf",
-                "action_schedule": "action_schedule.csv",
             }[str(artifact["artifact_type"])]
             target = destination / target_name
             if source != target.resolve():
@@ -510,17 +552,195 @@ def export_run(
                     "sha256": sha256_file(target),
                 }
             )
+
+    model_source = _confined_run_input(
+        run_payload.get("model_path"),
+        runs_root=runs_root,
+    )
+    controlled_run = str(run_payload.get("run_type")) in {
+        "agent",
+        "fixed_override",
+        "rule",
+    }
+    if controlled_run and model_source is not None:
+        _copy_export_input(
+            model_source,
+            destination / "agent_replay.idf",
+            artifact_type="replay_model_from_immutable_run_input",
+            copied=copied,
+        )
+        _copy_export_input(
+            model_source.parent / "actuator_map.csv",
+            destination / "actuator_map.csv",
+            artifact_type="actuator_map_from_immutable_run_input",
+            copied=copied,
+        )
+    _copy_export_input(
+        run_directory / "energyplus" / "api_points.csv",
+        destination / "api_points.csv",
+        artifact_type="energyplus_api_points",
+        copied=copied,
+    )
+
+    expected_controlled_artifacts: tuple[str, ...] = ()
+    if controlled_run and not bool(run_payload["is_fake"]):
+        expected_controlled_artifacts = (
+            "action_schedule.csv",
+            "actuator_map.csv",
+            "agent_replay.idf",
+            "api_points.csv",
+        )
+    missing_controlled_artifacts = [
+        name
+        for name in expected_controlled_artifacts
+        if not (destination / name).is_file()
+        or (name == "action_schedule.csv" and len(action_rows) == 0)
+    ]
+    energyplus_output = run_directory / "energyplus"
+    export_manifest = {
+        "run_id": run_id,
+        "exported_at": datetime.now(UTC).isoformat(),
+        "data_status": run_payload["data_status"],
+        "copied_artifacts": copied,
+        "missing_recorded_artifacts": missing,
+        "missing_controlled_artifacts": missing_controlled_artifacts,
+        "replay_action_count": len(action_rows),
+        "replay_ready": controlled_run
+        and not bool(run_payload["is_fake"])
+        and not missing_controlled_artifacts,
+        "energyplus_output_directory": str(energyplus_output),
+        "energyplus_output_preserved": energyplus_output.is_dir(),
+    }
     _write_json(
         destination / "export-manifest.json",
-        {
-            "run_id": run_id,
-            "exported_at": datetime.now(UTC).isoformat(),
-            "data_status": run_payload["data_status"],
-            "copied_artifacts": copied,
-            "missing_recorded_artifacts": missing,
-        },
+        _portable_export_value(
+            export_manifest,
+            runs_root=runs_root,
+            run_directory=run_directory,
+        ),
     )
     return destination
+
+
+def _portable_export_value(
+    value: Any,
+    *,
+    runs_root: Path,
+    run_directory: Path,
+    field_name: str | None = None,
+) -> Any:
+    """Replace absolute path fields with stable repository/run references."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _portable_export_value(
+                item,
+                runs_root=runs_root,
+                run_directory=run_directory,
+                field_name=str(key),
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [
+            _portable_export_value(
+                item,
+                runs_root=runs_root,
+                run_directory=run_directory,
+                field_name=field_name,
+            )
+            for item in value
+        ]
+    if not isinstance(value, str) or not _path_bearing_field(field_name):
+        return value
+    return _portable_artifact_reference(
+        value,
+        runs_root=runs_root,
+        run_directory=run_directory,
+    )
+
+
+def _path_bearing_field(field_name: str | None) -> bool:
+    if field_name is None:
+        return False
+    folded = field_name.casefold()
+    return folded in {"export", "source"} or any(
+        marker in folded for marker in ("artifact", "directory", "file", "path")
+    )
+
+
+def _portable_artifact_reference(
+    value: str,
+    *,
+    runs_root: Path,
+    run_directory: Path,
+) -> str:
+    """Return a portable label for an absolute artifact path."""
+
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        windows_path = PureWindowsPath(value)
+        if windows_path.is_absolute():
+            return f"external/{windows_path.name}"
+        return value
+    resolved = candidate.resolve()
+    roots = (
+        ("run", run_directory.resolve()),
+        ("repository", repository_root().resolve()),
+        ("runs", runs_root.resolve()),
+    )
+    for label, root in roots:
+        if resolved == root:
+            return label
+        if resolved.is_relative_to(root):
+            return f"{label}/{resolved.relative_to(root).as_posix()}"
+    return f"external/{resolved.name}"
+
+
+def _confined_run_input(raw_path: Any, *, runs_root: Path) -> Path | None:
+    """Resolve a recorded run input only below the repository or configured run root."""
+
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    candidate = Path(raw_path).expanduser()
+    if not candidate.is_absolute():
+        candidate = repository_root() / candidate
+    try:
+        resolved = candidate.resolve(strict=True)
+    except OSError:
+        return None
+    roots = (repository_root().resolve(), runs_root.resolve())
+    if not any(resolved == root or resolved.is_relative_to(root) for root in roots):
+        return None
+    return resolved if resolved.is_file() else None
+
+
+def _copy_export_input(
+    source: Path,
+    target: Path,
+    *,
+    artifact_type: str,
+    copied: list[dict[str, Any]],
+) -> bool:
+    """Copy an exact run input when present without replacing an earlier artifact."""
+
+    if not source.is_file():
+        return target.is_file()
+    target_resolved = target.resolve()
+    if any(Path(str(item["export"])).resolve() == target_resolved for item in copied):
+        return True
+    source_resolved = source.resolve()
+    if source_resolved != target_resolved:
+        shutil.copy2(source_resolved, target_resolved)
+    copied.append(
+        {
+            "artifact_type": artifact_type,
+            "source": str(source_resolved),
+            "export": str(target_resolved),
+            "sha256": sha256_file(target_resolved),
+        }
+    )
+    return True
 
 
 def render_text_pdf(
