@@ -1,0 +1,167 @@
+EcoLoop Building Agents - rescue baseline
+Captured: 2026-07-26 (Asia/Calcutta)
+Protected source commit: 0fc71b18c2c37fbb5ead3319a6bb41a85ff1d2e1
+Original branch: main
+Rescue branch: codex/ecoloop-rescue
+Tracked working-tree changes before rescue: none
+
+Ignored local state present at capture:
+- .env (contents not recorded)
+- .venv and Python/tool caches
+- 26 run/output directories under runs/
+- runs/ecoloop.db and SQLite WAL/SHM files
+- verified local weather/default.epw
+- generated submission PDFs and source archives
+- Honeywell_Hackathon_Submission/ and its outer ZIP
+- temporary presentation and audit render directories
+
+Tracked repository tree at the protected commit:
+
+.env.example
+.gitattributes
+.github/workflows/ci.yml
+.gitignore
+AGENTS.md
+LICENSE
+Makefile
+README.md
+THIRD_PARTY_NOTICES.md
+config/default.toml
+docs/architecture.md
+docs/control-policy.md
+docs/demo-script.md
+docs/diagrams/system-architecture.mmd
+docs/diagrams/system-architecture.png
+docs/diagrams/system-architecture.svg
+docs/implementation-plan.md
+docs/limitations.md
+docs/methodology.md
+docs/presentation-content.md
+docs/progress.md
+docs/prompt-engineering.md
+docs/reproducibility.md
+docs/results.md
+docs/troubleshooting.md
+models/base/ENERGYPLUS_LICENSE.txt
+models/base/PROVENANCE.json
+models/base/SOURCE.md
+models/base/building.idf
+models/generated/.gitkeep
+models/generated/action_schedule.csv
+models/generated/actuator_map.csv
+models/generated/agent_ready.idf
+models/generated/agent_replay.idf
+models/generated/baseline.idf
+models/generated/preparation-manifest.json
+presentation/ecoloop-submission.pptx
+presentation/template.pptx
+pyproject.toml
+results/action_schedule.csv
+results/actuator_map.csv
+results/agent_replay.idf
+results/api_points.csv
+results/comparison.csv
+results/comparison.json
+results/decisions.jsonl
+results/metrics.csv
+results/metrics.json
+results/telemetry.csv
+runs/.gitkeep
+scripts/export_presentation_pdf.ps1
+scripts/install_weather.py
+src/ecoloop/__init__.py
+src/ecoloop/__main__.py
+src/ecoloop/agent/__init__.py
+src/ecoloop/agent/audit.py
+src/ecoloop/agent/client.py
+src/ecoloop/agent/loop.py
+src/ecoloop/agent/models.py
+src/ecoloop/agent/ollama_host.py
+src/ecoloop/agent/prompt.py
+src/ecoloop/agent/reliability.py
+src/ecoloop/cli.py
+src/ecoloop/config.py
+src/ecoloop/control/__init__.py
+src/ecoloop/control/cadence.py
+src/ecoloop/control/candidates.py
+src/ecoloop/control/constraints.py
+src/ecoloop/control/fallback.py
+src/ecoloop/control/safety.py
+src/ecoloop/coordinator.py
+src/ecoloop/dashboard/__init__.py
+src/ecoloop/dashboard/app.py
+src/ecoloop/dashboard/queries.py
+src/ecoloop/dashboard/styles.py
+src/ecoloop/db/__init__.py
+src/ecoloop/db/migrate.py
+src/ecoloop/db/migrations/001_initial.sql
+src/ecoloop/db/migrations/002_agent_timeout_audit.sql
+src/ecoloop/db/migrations/__init__.py
+src/ecoloop/db/store.py
+src/ecoloop/demo.py
+src/ecoloop/doctor.py
+src/ecoloop/energyplus/__init__.py
+src/ecoloop/energyplus/discovery.py
+src/ecoloop/energyplus/handles.py
+src/ecoloop/energyplus/logs.py
+src/ecoloop/energyplus/model.py
+src/ecoloop/energyplus/replay.py
+src/ecoloop/energyplus/results.py
+src/ecoloop/energyplus/runtime.py
+src/ecoloop/energyplus/store_adapter.py
+src/ecoloop/evaluation.py
+src/ecoloop/exceptions.py
+src/ecoloop/logging.py
+src/ecoloop/mcp/__init__.py
+src/ecoloop/mcp/models.py
+src/ecoloop/mcp/path_policy.py
+src/ecoloop/mcp/server.py
+src/ecoloop/mcp/services.py
+src/ecoloop/mcp/sqlite_service.py
+src/ecoloop/mcp/tools.py
+src/ecoloop/metrics.py
+src/ecoloop/py.typed
+src/ecoloop/reporting.py
+src/ecoloop/schemas.py
+src/ecoloop/time_utils.py
+submission/.gitkeep
+tests/__init__.py
+tests/integration/test_agent_loop.py
+tests/integration/test_cli.py
+tests/integration/test_coordinator.py
+tests/integration/test_dashboard_app.py
+tests/integration/test_dashboard_queries.py
+tests/integration/test_demo.py
+tests/integration/test_evaluation.py
+tests/integration/test_fake_closed_loop.py
+tests/integration/test_mcp_stdio.py
+tests/integration/test_reporting.py
+tests/integration/test_timeout_circuit_breaker.py
+tests/real/test_closed_loop_smoke.py
+tests/real/test_energyplus_smoke.py
+tests/real/test_ollama_smoke.py
+tests/support/__init__.py
+tests/support/agent_fakes.py
+tests/support/fake_mcp.py
+tests/support/mcp_test_server.py
+tests/unit/__init__.py
+tests/unit/_factories.py
+tests/unit/test_candidates.py
+tests/unit/test_doctor.py
+tests/unit/test_energyplus_logs.py
+tests/unit/test_energyplus_runtime.py
+tests/unit/test_energyplus_store_adapter.py
+tests/unit/test_handles.py
+tests/unit/test_mcp_tools.py
+tests/unit/test_metrics.py
+tests/unit/test_model_prep.py
+tests/unit/test_ollama_host.py
+tests/unit/test_prompt_context.py
+tests/unit/test_result_parser.py
+tests/unit/test_safety.py
+tests/unit/test_schemas.py
+tests/unit/test_store.py
+tests/unit/test_time_utils.py
+uv.lock
+weather/README.md
+weather/SOURCE.md
