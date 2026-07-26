@@ -48,6 +48,13 @@ A decision is incomplete unless the trace contains:
 One concise corrective prompt identifies missing operations. A second incomplete
 attempt falls back deterministically.
 
+After the model makes progress, the host removes already-completed protocol
+stages from the Ollama tool definitions. Repeated state or constraint calls
+cannot consume every round by restarting the sequence. Candidate tools remain
+available only after state and constraints, and terminal tools become the final
+selection surface after candidate evaluation. All tools are still discovered
+from the live MCP server rather than hard-coded Python calls.
+
 ## Compact state
 
 The context includes:
@@ -108,10 +115,11 @@ No raw log line is interpreted as an instruction.
 - maximum tool rounds;
 - last-safe interval;
 - deterministic fallback;
-- consecutive-failure circuit breaker.
+- consecutive-failure circuit breaker with one skipped interval and a
+  deterministic half-open probe.
 
-Each attempt stores end-to-end latency and individual tool durations for mean and
-p95 reporting.
+Each attempt stores end-to-end latency, individual tool durations, and the
+number of timeout attempts for mean, p95, and reliability reporting.
 
 ## Prompt-injection treatment
 

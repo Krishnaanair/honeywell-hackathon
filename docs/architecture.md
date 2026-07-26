@@ -190,14 +190,18 @@ stateDiagram-v2
     LastSafe --> LLMEnabled: next decision succeeds
     LastSafe --> RuleFallback: second consecutive failure
     RuleFallback --> CircuitOpen: configured failure threshold reached
-    CircuitOpen --> RuleFallback: while disabled
-    CircuitOpen --> LLMEnabled: explicit recovery check succeeds
+    CircuitOpen --> RuleFallback: skip one decision interval
+    RuleFallback --> HalfOpen: next decision
+    HalfOpen --> LLMEnabled: validated action succeeds
+    HalfOpen --> CircuitOpen: probe fails
 ```
 
 The last-known-safe action is held for at most one normal interval. The rule
 fallback then follows occupancy, comfort margin, demand, and safety bounds.
-Repeated failures open the circuit breaker. A fatal EnergyPlus message ends the
-run, preserves logs, and suppresses comparison metrics.
+Repeated failures open the circuit breaker. One interval uses deterministic
+fallback before a half-open model probe can close or reopen it. A fatal
+EnergyPlus message ends the run, preserves logs, and suppresses comparison
+metrics.
 
 ## Log and prompt latency management
 

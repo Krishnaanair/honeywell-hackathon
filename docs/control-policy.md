@@ -75,6 +75,11 @@ Candidates are the bounded Cartesian combination of values near:
 Before scoring, invalid deadbands, ranges, unsupported fields, excessive ramp
 changes, and overlong holds are removed.
 
+Candidate generation uses the same ramp envelope as the validator. At the
+narrow occupied-boundary transition described above, it can therefore return
+the nearest active-boundary pair for evaluation instead of failing before the
+model can make a bounded selection.
+
 ## Candidate scoring
 
 Each candidate exposes components rather than only one opaque score:
@@ -104,9 +109,11 @@ cannot invent an out-of-grid actuator value and bypass validation.
    unexpired after revalidation.
 3. A deterministic rule controller then selects a bounded candidate based on
    occupancy, comfort margin, demand, and reference schedules.
-4. Repeated failures open the circuit breaker and disable model control.
-5. Recovery requires a successful health/tool check; it does not occur merely
-   because time passed.
+4. Repeated failures open the circuit breaker and disable model control for one
+   decision interval.
+5. The next decision is a half-open model probe. A successful validated terminal
+   action closes the breaker; another failure reopens it and applies another
+   skipped fallback interval.
 
 Every fallback records a reason code and source.
 
