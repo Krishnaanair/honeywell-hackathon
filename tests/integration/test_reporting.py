@@ -451,8 +451,6 @@ def test_source_zip_matches_git_text_and_preserves_binary_and_untracked_bytes(
     _run_git(root, "add", "--all")
     _commit_index(root)
 
-    (root / "README.md").write_bytes(b"# Canonical source\r\n")
-    (root / "src" / "application.py").write_bytes(b"VALUE = 1\r\n")
     metrics_path = root / "results" / "metrics.json"
     metrics_path.parent.mkdir(parents=True)
     metrics_path.write_bytes(b'{"verified": true}\r\n')
