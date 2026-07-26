@@ -1,0 +1,29 @@
+flowchart TB
+    subgraph Simulation["EnergyPlus child process"]
+        direction LR
+        E["EnergyPlus 26.1.0"]
+        OBS["End-zone-timestep callback"]
+        ACT["Early next-timestep callback"]
+        EX["Data Exchange API"]
+        E --> OBS
+        ACT --> E
+        EX <--> E
+    end
+
+    BUS[("SQLite WAL bus")]
+    MCP["FastMCP stdio server"]
+    HOST["Local Ollama host"]
+    SAFE["Deterministic validator"]
+    PARSE["Official output parser"]
+    UI["Streamlit dashboard / replay"]
+
+    OBS -->|"observation"| BUS
+    BUS --> MCP
+    MCP <--> HOST
+    HOST -->|"candidate"| MCP
+    MCP --> SAFE
+    SAFE -->|"validated action"| BUS
+    BUS --> ACT
+    E --> PARSE
+    PARSE --> BUS
+    BUS --> UI

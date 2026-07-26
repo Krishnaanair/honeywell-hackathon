@@ -1,0 +1,12 @@
+{
+  "energyplus_distribution": "EnergyPlus 26.1.0; installation is discovered locally at runtime",
+  "energyplus_version": "26.1.0",
+  "license_path": "models/base/ENERGYPLUS_LICENSE.txt",
+  "repository_model": "models/base/building.idf",
+  "repository_model_sha256": "cd8e036e161c514903d9a83d5aeeb6d72396f6173b7f6d742aa2f1dd2978152f",
+  "selection_reasons": [
+    "existing version-controlled base model"
+  ],
+  "source_identity": "building.idf",
+  "source_name": "building.idf"
+}

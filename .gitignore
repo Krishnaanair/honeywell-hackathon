@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+
+# Local configuration and editors
+.env
+.env.*
+!.env.example
+.envrc
+*.key
+*.p12
+*.pem
+*.pfx
+credentials*.json
+.idea/
+.vscode/
+*.code-workspace
+
+# Runtime outputs
+runs/*
+!runs/.gitkeep
+models/generated/*
+!models/generated/.gitkeep
+!models/generated/action_schedule.csv
+!models/generated/actuator_map.csv
+!models/generated/agent_ready.idf
+!models/generated/agent_replay.idf
+!models/generated/baseline.idf
+!models/generated/preparation-manifest.json
+submission/*
+!submission/.gitkeep
+tmp/
+presentation/build/
+
+# EnergyPlus/weather assets that must be supplied or verified locally
+weather/*.epw
+weather/*.stat
+weather/*.ddy
+*.eso
+*.mtr
+
+# OS
+.DS_Store
+Thumbs.db
+Desktop.ini

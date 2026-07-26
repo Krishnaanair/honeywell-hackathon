@@ -1,0 +1,58 @@
+[project]
+energyplus_version = "26.1.0"
+zone_timestep_minutes = 15
+
+[periods.smoke]
+start_month = 7
+start_day = 15
+end_month = 7
+end_day = 15
+
+[periods.demo]
+start_month = 7
+start_day = 15
+end_month = 7
+end_day = 17
+
+[periods.evaluation]
+start_month = 7
+start_day = 15
+end_month = 7
+end_day = 21
+
+[control]
+normal_decision_interval_minutes = 60
+maximum_action_hold_minutes = 120
+maximum_tool_rounds = 8
+maximum_consecutive_timeouts = 3
+state_token_budget = 1800
+demand_threshold_kw = 75.0
+
+[control.occupied]
+heating_min_c = 19.0
+heating_max_c = 22.0
+cooling_min_c = 23.0
+cooling_max_c = 26.0
+minimum_deadband_c = 2.0
+maximum_change_c = 1.0
+operative_min_c = 22.0
+operative_max_c = 26.0
+absolute_pmv_max = 0.7
+co2_max_ppm = 1000.0
+
+[control.unoccupied]
+heating_min_c = 17.0
+heating_max_c = 21.0
+cooling_min_c = 24.0
+cooling_max_c = 29.0
+minimum_deadband_c = 2.0
+maximum_change_c = 2.0
+
+[evaluation]
+tariff_per_kwh = 0.12
+carbon_kg_per_kwh = 0.70
+telemetry_energy_tolerance_percent = 2.0
+
+[dashboard]
+refresh_seconds = 2.0
+replay_speed = 4.0

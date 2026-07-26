@@ -1,0 +1,3 @@
+logical_action,component_type,control_type,actuator_key,reference_schedule,required
+heating_setpoint_c,Schedule:Compact,Schedule Value,EcoLoop Actuated Heating Setpoint,EcoLoop Reference Heating Setpoint,true
+cooling_setpoint_c,Schedule:Compact,Schedule Value,EcoLoop Actuated Cooling Setpoint,EcoLoop Reference Cooling Setpoint,true

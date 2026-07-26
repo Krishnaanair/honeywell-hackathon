@@ -1,0 +1,67 @@
+{
+  "agent_ready": {
+    "actuated_cooling_schedule": "EcoLoop Actuated Cooling Setpoint",
+    "actuated_heating_schedule": "EcoLoop Actuated Heating Setpoint",
+    "controlled": true,
+    "fanger_assumptions": {
+      "air_velocity": "0.1 m/s still-air office assumption",
+      "clothing_insulation": "0.5 clo summer office ensemble",
+      "mean_radiant_temperature": "EnclosureAveraged",
+      "work_efficiency": "0.0 dimensionless external work for sedentary office activity"
+    },
+    "fanger_people_zone_map": {
+      "SPACE1-1 People 1": "SPACE1-1",
+      "SPACE2-1 People 1": "SPACE2-1",
+      "SPACE3-1 People 1": "SPACE3-1",
+      "SPACE4-1 People 1": "SPACE4-1",
+      "SPACE5-1 People 1": "SPACE5-1"
+    },
+    "fanger_prerequisite_schedules": {
+      "EcoLoop Air Velocity": 0.1,
+      "EcoLoop Summer Office Clothing": 0.5,
+      "EcoLoop Work Efficiency": 0.0
+    },
+    "people_objects_fanger_enabled": 5,
+    "reference_cooling_schedule": "EcoLoop Reference Cooling Setpoint",
+    "reference_heating_schedule": "EcoLoop Reference Heating Setpoint",
+    "thermostat_objects_patched": 1
+  },
+  "baseline": {
+    "actuated_cooling_schedule": "EcoLoop Actuated Cooling Setpoint",
+    "actuated_heating_schedule": "EcoLoop Actuated Heating Setpoint",
+    "controlled": false,
+    "fanger_assumptions": {
+      "air_velocity": "0.1 m/s still-air office assumption",
+      "clothing_insulation": "0.5 clo summer office ensemble",
+      "mean_radiant_temperature": "EnclosureAveraged",
+      "work_efficiency": "0.0 dimensionless external work for sedentary office activity"
+    },
+    "fanger_people_zone_map": {
+      "SPACE1-1 People 1": "SPACE1-1",
+      "SPACE2-1 People 1": "SPACE2-1",
+      "SPACE3-1 People 1": "SPACE3-1",
+      "SPACE4-1 People 1": "SPACE4-1",
+      "SPACE5-1 People 1": "SPACE5-1"
+    },
+    "fanger_prerequisite_schedules": {
+      "EcoLoop Air Velocity": 0.1,
+      "EcoLoop Summer Office Clothing": 0.5,
+      "EcoLoop Work Efficiency": 0.0
+    },
+    "people_objects_fanger_enabled": 5,
+    "reference_cooling_schedule": "EcoLoop Reference Cooling Setpoint",
+    "reference_heating_schedule": "EcoLoop Reference Heating Setpoint",
+    "thermostat_objects_patched": 1
+  },
+  "energyplus_distribution": "EnergyPlus 26.1.0; installation is discovered locally at runtime",
+  "energyplus_version": "26.1.0",
+  "replay_method": "EnergyPlus Runtime API applies action_schedule.csv to the same discovered schedule actuators; no local model inference is called.",
+  "runtime_electricity_signals": {
+    "fallback": "ElectricityNet:Facility",
+    "note": "The Runtime API records which handle supplied callback telemetry. Official final energy always comes from Electricity:Facility in EnergyPlus SQL/CSV and is cross-checked.",
+    "preferred": "Electricity:Facility"
+  },
+  "source_model": "models/base/building.idf",
+  "source_model_sha256": "cd8e036e161c514903d9a83d5aeeb6d72396f6173b7f6d742aa2f1dd2978152f",
+  "timestep_minutes": 15
+}
