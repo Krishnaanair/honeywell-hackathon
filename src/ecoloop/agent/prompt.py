@@ -44,7 +44,7 @@ unsafe. A terminal tool call is mandatory.
 """.strip()
 
 CORRECTIVE_TEMPLATE = (
-    "Protocol correction: the decision is incomplete or out of order. "
+    "Protocol correction: {violation}. "
     "Use run_id={run_id}. Missing/required next sequence: {required}. "
     "Make tool calls now; end only after a successful apply_control_action "
     "or request_safe_fallback."
@@ -145,11 +145,20 @@ def build_compact_context(
     return encoded
 
 
-def corrective_prompt(run_id: str, missing: Sequence[str]) -> str:
+def corrective_prompt(
+    run_id: str,
+    missing: Sequence[str],
+    *,
+    violation: str = "the decision is incomplete or out of order",
+) -> str:
     """Build the single concise corrective reprompt."""
 
     required = " -> ".join(missing) if missing else "complete the required tool sequence"
-    return CORRECTIVE_TEMPLATE.format(run_id=run_id, required=required)
+    return CORRECTIVE_TEMPLATE.format(
+        run_id=run_id,
+        required=required,
+        violation=" ".join(violation.split())[:240],
+    )
 
 
 def candidate_selection_prompt(

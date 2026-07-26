@@ -7,6 +7,7 @@ import json
 import math
 from collections.abc import Iterable
 
+from ecoloop.control.safety import ramp_envelope
 from ecoloop.schemas import (
     BuildingObservation,
     CandidateAction,
@@ -44,24 +45,18 @@ def generate_candidate_actions(
     limits = constraints.active_limits
     current_heating = float(observation.heating_setpoint_c)
     current_cooling = float(observation.cooling_setpoint_c)
-    heating_low = max(
-        float(limits.heating_min_c),
-        current_heating - float(limits.maximum_change_c),
+    heating_low, heating_high, _ = ramp_envelope(
+        current_heating,
+        lower=float(limits.heating_min_c),
+        upper=float(limits.heating_max_c),
+        maximum_change=float(limits.maximum_change_c),
     )
-    heating_high = min(
-        float(limits.heating_max_c),
-        current_heating + float(limits.maximum_change_c),
+    cooling_low, cooling_high, _ = ramp_envelope(
+        current_cooling,
+        lower=float(limits.cooling_min_c),
+        upper=float(limits.cooling_max_c),
+        maximum_change=float(limits.maximum_change_c),
     )
-    cooling_low = max(
-        float(limits.cooling_min_c),
-        current_cooling - float(limits.maximum_change_c),
-    )
-    cooling_high = min(
-        float(limits.cooling_max_c),
-        current_cooling + float(limits.maximum_change_c),
-    )
-    if heating_low > heating_high or cooling_low > cooling_high:
-        raise ValueError("current setpoints are incompatible with active limits")
 
     recommended_heating = (
         _clamp(20.0, heating_low, heating_high) if observation.occupied else heating_low

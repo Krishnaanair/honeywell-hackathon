@@ -97,13 +97,13 @@ class SafetyValidator:
         observation = context.latest_observation
         current_heating = float(observation.heating_setpoint_c)
         current_cooling = float(observation.cooling_setpoint_c)
-        heating_low, heating_high, heating_transition = _ramp_envelope(
+        heating_low, heating_high, heating_transition = ramp_envelope(
             current_heating,
             lower=float(limits.heating_min_c),
             upper=float(limits.heating_max_c),
             maximum_change=float(limits.maximum_change_c),
         )
-        cooling_low, cooling_high, cooling_transition = _ramp_envelope(
+        cooling_low, cooling_high, cooling_transition = ramp_envelope(
             current_cooling,
             lower=float(limits.cooling_min_c),
             upper=float(limits.cooling_max_c),
@@ -545,7 +545,7 @@ def _clamp(value: float, lower: float, upper: float) -> float:
     return min(max(value, lower), upper)
 
 
-def _ramp_envelope(
+def ramp_envelope(
     current: float,
     *,
     lower: float,

@@ -11,7 +11,11 @@ import pytest
 
 from ecoloop.agent.loop import AgentHost, AgentHostConfig
 from ecoloop.agent.models import ModelResponse, ToolRequest
-from tests.support.agent_fakes import DirectFakeMCPClient, TimeoutModel
+from tests.support.agent_fakes import (
+    DirectFakeMCPClient,
+    TimeoutModel,
+    valid_tool_sequence,
+)
 
 
 class SlowSequentialModel:
@@ -47,6 +51,28 @@ class SlowSequentialModel:
         return ModelResponse(tool_calls=[request])
 
 
+class TimeoutThenValidModel:
+    """Trip the breaker, then return a valid sequence for its half-open probe."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+
+    @property
+    def model_name(self) -> str:
+        return "explicit-recovery-test-model"
+
+    async def complete(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ModelResponse:
+        del messages, tools
+        self.call_count += 1
+        if self.call_count <= 4:
+            await asyncio.sleep(60)
+        return valid_tool_sequence()
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_timeout_retries_once_then_falls_back() -> None:
@@ -64,6 +90,7 @@ async def test_timeout_retries_once_then_falls_back() -> None:
     decision = await host.decide("fake-run")
     assert decision.status == "fallback"
     assert decision.timeout_count == 2
+    assert decision.fallback_status == "model_timeout"
     assert model.call_count == 2
     assert decision.trace[-1].tool_name == "request_safe_fallback"
 
@@ -87,9 +114,36 @@ async def test_repeated_timeouts_open_circuit_and_disable_model() -> None:
     calls_after_open = model.call_count
     third = await host.decide("fake-run")
     assert first.status == second.status == third.status == "fallback"
+    assert first.fallback_status == second.fallback_status == "model_timeout"
+    assert third.fallback_status == "circuit_breaker_open"
     assert host.circuit_breaker.is_open("fake-run")
     assert model.call_count == calls_after_open
     assert third.tool_rounds == 0
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_half_open_probe_closes_breaker_after_one_skipped_interval() -> None:
+    model = TimeoutThenValidModel()
+    host = AgentHost(
+        mcp_client=DirectFakeMCPClient(),
+        model=model,
+        config=AgentHostConfig(
+            timeout_seconds=0.01,
+            maximum_consecutive_failures=2,
+            enable_action_cache=False,
+        ),
+    )
+
+    await host.decide("fake-run")
+    await host.decide("fake-run")
+    skipped = await host.decide("fake-run")
+    recovered = await host.decide("fake-run")
+
+    assert skipped.fallback_status == "circuit_breaker_open"
+    assert recovered.status == "applied"
+    assert not host.circuit_breaker.is_open("fake-run")
+    assert host.circuit_breaker.failure_count("fake-run") == 0
 
 
 @pytest.mark.integration

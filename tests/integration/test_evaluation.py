@@ -211,6 +211,7 @@ def _seed_run(
             latency_ms=100.0,
             completed=True,
             fallback_status="model_timeout",
+            timeout_count=1,
             timestamp=WALL_TIME,
         )
         proposed = CandidateAction(

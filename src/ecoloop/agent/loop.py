@@ -11,7 +11,13 @@ from typing import Any
 
 from ecoloop.agent.audit import DecisionSink, NullDecisionSink
 from ecoloop.agent.client import MCPClientError, MCPClientPort, tools_for_ollama
-from ecoloop.agent.models import AgentDecision, HostToolTrace, ModelResponse, ToolRequest
+from ecoloop.agent.models import (
+    AgentDecision,
+    HostToolTrace,
+    ModelResponse,
+    ToolRequest,
+    ToolSpec,
+)
 from ecoloop.agent.ollama_host import ModelBackend
 from ecoloop.agent.prompt import (
     SYSTEM_PROMPT,
@@ -49,6 +55,18 @@ _CONTROL_ACTION_FIELDS = (
     "explanation",
     "model",
     "latency_ms",
+)
+_STATE_TOOL = "get_current_building_state"
+_CONSTRAINT_TOOL = "get_constraints"
+_CANDIDATE_TOOLS = frozenset({"generate_candidate_actions", "evaluate_candidate_actions"})
+_TERMINAL_TOOLS = frozenset({"apply_control_action", "request_safe_fallback"})
+_RUNTIME_CONTEXT_TOOLS = frozenset(
+    {
+        "get_recent_trends",
+        "get_weather_forecast",
+        "get_grid_signal",
+        "get_last_energyplus_errors",
+    }
 )
 
 
@@ -147,7 +165,7 @@ class AgentHost:
                 "MCP server is missing required tools: " + ", ".join(missing_tools)
             )
 
-        if self._breaker.is_open(run_id):
+        if not self._breaker.should_attempt(run_id):
             return await self._fallback_decision(
                 run_id,
                 trace,
@@ -184,7 +202,6 @@ class AgentHost:
                 ),
             },
         ]
-        ollama_tools = tools_for_ollama(tools)
         sequence = _SequenceState()
         corrective_used = False
         candidate_selection_reprompt_used = False
@@ -197,6 +214,9 @@ class AgentHost:
         )
 
         for round_number in range(1, self._config.maximum_tool_rounds + 1):
+            available_tools = _available_tools(tools, sequence)
+            available_names = {tool.name for tool in available_tools}
+            ollama_tools = tools_for_ollama(available_tools)
             remaining_seconds = decision_deadline - loop.time()
             if remaining_seconds <= 0:
                 self._breaker.record_failure(run_id)
@@ -282,7 +302,12 @@ class AgentHost:
                     }
                 )
                 continue
-            violation = _first_violation(response.tool_calls, run_id, sequence, names)
+            violation = _first_violation(
+                response.tool_calls,
+                run_id,
+                sequence,
+                available_names,
+            )
             if violation is not None or not response.tool_calls:
                 if corrective_used:
                     self._breaker.record_failure(run_id)
@@ -300,7 +325,11 @@ class AgentHost:
                 messages.append(
                     {
                         "role": "user",
-                        "content": corrective_prompt(run_id, sequence.missing()),
+                        "content": corrective_prompt(
+                            run_id,
+                            sequence.missing(),
+                            violation=violation or "the model returned no tool call",
+                        ),
                     }
                 )
                 continue
@@ -308,7 +337,12 @@ class AgentHost:
             terminal: tuple[str, dict[str, Any], ToolRequest] | None = None
             candidate_selection_deferred = False
             for request in response.tool_calls:
-                current_violation = _tool_violation(request, run_id, sequence, names)
+                current_violation = _tool_violation(
+                    request,
+                    run_id,
+                    sequence,
+                    available_names,
+                )
                 if current_violation is not None:
                     violation = current_violation
                     break
@@ -406,7 +440,7 @@ class AgentHost:
                     self._breaker.record_success(run_id)
                     self._remember_action(run_id, sequence, terminal_request)
                 else:
-                    self._breaker.record_failure(run_id)
+                    self._breaker.record_success(run_id)
                 decision = _make_decision(
                     run_id=run_id,
                     observation_id=_required_observation_id(sequence),
@@ -419,9 +453,7 @@ class AgentHost:
                     corrective_used=corrective_used,
                     timeout_count=timeout_count,
                     fallback_status=(
-                        str(result.get("fallback_status", "model_requested"))
-                        if tool_name == "request_safe_fallback"
-                        else None
+                        "model_requested" if tool_name == "request_safe_fallback" else None
                     ),
                 )
                 await self._decision_sink.record(
@@ -447,7 +479,11 @@ class AgentHost:
                 messages.append(
                     {
                         "role": "user",
-                        "content": corrective_prompt(run_id, sequence.missing()),
+                        "content": corrective_prompt(
+                            run_id,
+                            sequence.missing(),
+                            violation=violation,
+                        ),
                     }
                 )
 
@@ -599,7 +635,7 @@ class AgentHost:
             trace=trace,
             corrective_used=corrective_used,
             timeout_count=timeout_count,
-            fallback_status=str(result.get("fallback_status", fallback_status)),
+            fallback_status=fallback_status,
         )
         await self._decision_sink.record(
             decision,
@@ -652,6 +688,23 @@ class AgentHost:
             if key in _CANDIDATE_FIELDS and value is not None
         }
         self._cache.put(run_id, sequence.current_state, candidate)
+
+
+def _available_tools(
+    tools: list[ToolSpec],
+    sequence: _SequenceState,
+) -> list[ToolSpec]:
+    """Expose only tools that can advance the current guarded protocol stage."""
+
+    if not sequence.state_seen:
+        allowed = REQUIRED_TOOL_NAMES
+    elif not sequence.constraints_seen:
+        allowed = frozenset({_CONSTRAINT_TOOL}) | _CANDIDATE_TOOLS | _RUNTIME_CONTEXT_TOOLS
+    elif not sequence.candidates_seen:
+        allowed = _CANDIDATE_TOOLS | _RUNTIME_CONTEXT_TOOLS
+    else:
+        allowed = _TERMINAL_TOOLS
+    return [tool for tool in tools if tool.name in allowed]
 
 
 def _first_violation(
@@ -714,7 +767,7 @@ def _tool_violation(
     preflight: bool = False,
 ) -> str | None:
     if request.name not in discovered:
-        return f"undiscovered tool: {request.name}"
+        return f"tool is unavailable at the current protocol stage: {request.name}"
     supplied_run = request.arguments.get("run_id")
     if supplied_run is not None and supplied_run != run_id:
         return "wrong run_id"

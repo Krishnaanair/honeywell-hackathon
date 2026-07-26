@@ -41,6 +41,20 @@ def test_candidate_grid_is_deterministic_unique_and_bounded() -> None:
     assert all(item.cooling_setpoint_c - item.heating_setpoint_c >= 2.0 for item in first)
 
 
+def test_candidate_grid_uses_guarded_occupancy_transition_envelope() -> None:
+    current = observation(
+        occupied=True,
+        heating_setpoint_c=17.0,
+        cooling_setpoint_c=29.0,
+    )
+
+    generated = generate_candidate_actions(current, constraints(occupied=True))
+
+    assert [(item.heating_setpoint_c, item.cooling_setpoint_c) for item in generated] == [
+        (19.0, 26.0)
+    ]
+
+
 def test_candidate_grid_rejects_run_or_occupancy_mismatch() -> None:
     with pytest.raises(ValueError, match="same run"):
         generate_candidate_actions(

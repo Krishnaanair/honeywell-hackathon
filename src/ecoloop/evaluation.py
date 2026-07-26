@@ -592,7 +592,7 @@ def _audit_summary(
 ) -> _AuditSummary:
     decision_rows = connection.execute(
         """
-        SELECT latency_ms, fallback_status
+        SELECT latency_ms, fallback_status, timeout_count
         FROM agent_decisions
         WHERE run_id = ?
         """,
@@ -600,25 +600,7 @@ def _audit_summary(
     ).fetchall()
     latencies = [float(row["latency_ms"]) for row in decision_rows]
     latency = calculate_latency_metrics(latencies)
-    timeout_count = sum(
-        1
-        for row in decision_rows
-        if row["fallback_status"] is not None
-        and "timeout" in str(row["fallback_status"]).casefold()
-    )
-    explicit_timeout = connection.execute(
-        """
-        SELECT value
-        FROM metrics
-        WHERE run_id = ? AND metric_name = 'timeout_count' AND value IS NOT NULL
-        """,
-        (run_id,),
-    ).fetchone()
-    if explicit_timeout is not None:
-        value = float(explicit_timeout["value"])
-        if not value.is_integer() or value < 0:
-            raise EvaluationError("persisted timeout_count is not a non-negative integer")
-        timeout_count = int(value)
+    timeout_count = sum(int(row["timeout_count"]) for row in decision_rows)
 
     tool_count = int(
         connection.execute(
@@ -746,8 +728,8 @@ def _persist_final_metrics(
             "reasons": list(verification_reasons),
             "source": source,
             "timeout_count_semantics": (
-                "Explicit persisted timeout_count when available; otherwise "
-                "decision outcomes marked with a timeout fallback."
+                "Sum of local inference timeout attempts persisted with each "
+                "supervisory decision, including recovered retries."
             ),
         },
         _FINAL_METRIC_NAME: metrics.model_dump(mode="json"),

@@ -79,7 +79,7 @@ def test_migrations_create_required_tables_and_enable_wal(store: SQLiteStore) ->
     }
     connection.close()
     assert str(journal_mode).casefold() == "wal"
-    assert user_version == 1
+    assert user_version == 2
     assert {
         "runs",
         "telemetry",

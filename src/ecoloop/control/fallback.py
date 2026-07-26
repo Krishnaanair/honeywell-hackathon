@@ -171,7 +171,7 @@ def reusable_last_safe_action(
         action=values,
         model="last-known-safe",
         latency_ms=0.0,
-        reason_code=ReasonCode.TIMEOUT_FALLBACK,
+        reason_code=ReasonCode.SAFE_FALLBACK,
         explanation="Reused the last validated values for one bounded interval.",
         fallback=True,
     )

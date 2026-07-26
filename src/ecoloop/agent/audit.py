@@ -65,6 +65,7 @@ class SQLiteDecisionSink:
             reason_code=_reason_code_or_none(action.get("reason_code")),
             explanation=_string_or_none(action.get("explanation")),
             fallback_status=decision.fallback_status,
+            timeout_count=decision.timeout_count,
         )
 
 

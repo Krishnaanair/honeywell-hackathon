@@ -968,12 +968,15 @@ class SQLiteStore:
         reason_code: str | None = None,
         explanation: str | None = None,
         fallback_status: str | None = None,
+        timeout_count: int = 0,
         timestamp: datetime | None = None,
     ) -> None:
         """Audit one complete supervisory decision attempt."""
 
         if latency_ms < 0:
             raise ValueError("latency_ms must be non-negative")
+        if timeout_count < 0:
+            raise ValueError("timeout_count must be non-negative")
         now = timestamp or self._clock()
         try:
             with self._connection() as connection:
@@ -982,9 +985,9 @@ class SQLiteStore:
                     INSERT INTO agent_decisions (
                         decision_id, run_id, timestamp, observation_id,
                         action_generation, model, latency_ms, reason_code,
-                        explanation, fallback_status, candidate_scores_json,
-                        state_summary_json, completed
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        explanation, fallback_status, timeout_count,
+                        candidate_scores_json, state_summary_json, completed
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         decision_id,
@@ -997,6 +1000,7 @@ class SQLiteStore:
                         reason_code,
                         explanation,
                         fallback_status,
+                        timeout_count,
                         _json_dumps(candidate_scores),
                         _json_dumps(state_summary or {}),
                         int(completed),

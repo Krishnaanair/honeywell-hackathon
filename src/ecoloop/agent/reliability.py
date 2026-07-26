@@ -11,24 +11,28 @@ from typing import Any
 
 
 class FailureCircuitBreaker:
-    """Open independently per run after consecutive decision failures."""
+    """Open per run, skip one interval, then permit one half-open probe."""
 
     def __init__(self, threshold: int) -> None:
         if threshold < 1:
             raise ValueError("threshold must be positive")
         self._threshold = threshold
         self._failures: dict[str, int] = {}
+        self._open_skips_remaining: dict[str, int] = {}
 
     def record_success(self, run_id: str) -> None:
         """Reset a run's consecutive failure counter."""
 
         self._failures.pop(run_id, None)
+        self._open_skips_remaining.pop(run_id, None)
 
     def record_failure(self, run_id: str) -> int:
         """Increment and return a run's consecutive failure count."""
 
         count = self._failures.get(run_id, 0) + 1
         self._failures[run_id] = count
+        if count >= self._threshold:
+            self._open_skips_remaining[run_id] = 1
         return count
 
     def is_open(self, run_id: str) -> bool:
@@ -40,6 +44,17 @@ class FailureCircuitBreaker:
         """Return the current consecutive failure count."""
 
         return self._failures.get(run_id, 0)
+
+    def should_attempt(self, run_id: str) -> bool:
+        """Return whether inference may run, consuming one open skip if needed."""
+
+        if not self.is_open(run_id):
+            return True
+        remaining = self._open_skips_remaining.get(run_id, 0)
+        if remaining > 0:
+            self._open_skips_remaining[run_id] = remaining - 1
+            return False
+        return True
 
 
 @dataclass(frozen=True, slots=True)

@@ -371,6 +371,7 @@ def test_fallback_and_one_interval_last_safe_reuse_still_require_validation() ->
     )
     assert reused is not None
     assert reused.action_generation == 2
+    assert reused.reason_code is ReasonCode.SAFE_FALLBACK
     assert (
         reusable_last_safe_action(
             (fallback, validation),

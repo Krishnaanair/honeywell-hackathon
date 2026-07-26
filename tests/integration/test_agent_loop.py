@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -36,6 +37,96 @@ class RejectingApplyClient(DirectFakeMCPClient):
                 "validation": {"accepted": False},
             }
         return await super().call_tool(name, arguments)
+
+
+class StagedSchemaModel:
+    """Follow one required tool at a time and record the schemas offered."""
+
+    def __init__(self) -> None:
+        self.call_count = 0
+        self.offered: list[set[str]] = []
+
+    @property
+    def model_name(self) -> str:
+        return "staged-schema-test-model"
+
+    async def complete(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ModelResponse:
+        del messages
+        self.offered.append(
+            {
+                str(tool["function"]["name"])
+                for tool in tools
+                if isinstance(tool.get("function"), Mapping)
+            }
+        )
+        responses = (
+            ToolRequest(
+                name="get_current_building_state",
+                arguments={"run_id": "fake-run"},
+            ),
+            ToolRequest(name="get_constraints", arguments={"run_id": "fake-run"}),
+            ToolRequest(
+                name="generate_candidate_actions",
+                arguments={"run_id": "fake-run"},
+            ),
+            ToolRequest(
+                name="apply_control_action",
+                arguments={
+                    "run_id": "fake-run",
+                    "observation_id": 1,
+                    "action": {
+                        "heating_setpoint_c": 20.0,
+                        "cooling_setpoint_c": 25.0,
+                        "hold_minutes": 60,
+                        "action_generation": 1,
+                        "reason_code": "ENERGY_OPTIMIZATION",
+                        "explanation": "Use the lowest-scored bounded candidate.",
+                    },
+                },
+            ),
+        )
+        request = responses[self.call_count]
+        self.call_count += 1
+        return ModelResponse(model=self.model_name, tool_calls=[request])
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_agent_exposes_only_tools_that_advance_the_protocol_stage() -> None:
+    model = StagedSchemaModel()
+    host = AgentHost(
+        mcp_client=DirectFakeMCPClient(),
+        model=model,
+        config=AgentHostConfig(enable_action_cache=False),
+    )
+
+    decision = await host.decide("fake-run")
+
+    assert decision.status == "applied"
+    assert model.offered[0] == {
+        "get_current_building_state",
+        "get_constraints",
+        "generate_candidate_actions",
+        "evaluate_candidate_actions",
+        "apply_control_action",
+        "request_safe_fallback",
+    }
+    assert "get_current_building_state" not in model.offered[1]
+    assert "get_constraints" in model.offered[1]
+    assert "apply_control_action" not in model.offered[1]
+    assert model.offered[2] >= {
+        "generate_candidate_actions",
+        "evaluate_candidate_actions",
+    }
+    assert "get_constraints" not in model.offered[2]
+    assert model.offered[3] == {
+        "apply_control_action",
+        "request_safe_fallback",
+    }
 
 
 @pytest.mark.integration
@@ -156,7 +247,7 @@ async def test_agent_falls_back_after_second_missing_tool_attempt() -> None:
     decision = await host.decide("fake-run")
     assert decision.status == "fallback"
     assert decision.corrective_reprompt_used is True
-    assert decision.fallback_status == "deterministic_rule"
+    assert decision.fallback_status == "tool_sequence_rejected"
     assert [name for name, _ in client.calls] == [
         "get_current_building_state",
         "get_constraints",
@@ -319,7 +410,8 @@ async def test_agent_honors_repeated_fallback_after_candidate_selection_reprompt
 
     assert decision.status == "fallback"
     assert model.call_count == 2
-    assert host.circuit_breaker.failure_count("fake-run") == 1
+    assert host.circuit_breaker.failure_count("fake-run") == 0
+    assert decision.fallback_status == "model_requested"
     assert [name for name, _ in client.calls] == [
         "get_current_building_state",
         "get_constraints",
