@@ -590,12 +590,13 @@ async def _run_loop(
                     continue
 
                 started = time.perf_counter()
+                terminal_observation = observation
                 try:
                     remaining_seconds = max(
                         0.01,
                         deadline - asyncio.get_running_loop().time(),
                     )
-                    status, fallback, result = await asyncio.wait_for(
+                    status, fallback, result, terminal_observation_id = await asyncio.wait_for(
                         _make_decision(
                             request.mode,
                             request.run_id,
@@ -605,6 +606,15 @@ async def _run_loop(
                         ),
                         timeout=min(decision_timeout, remaining_seconds),
                     )
+                    decided_observations.add(terminal_observation_id)
+                    if terminal_observation_id != observation.observation_id:
+                        resolved_terminal = await asyncio.to_thread(
+                            store.get_observation,
+                            request.run_id,
+                            terminal_observation_id,
+                        )
+                        if resolved_terminal is not None:
+                            terminal_observation = resolved_terminal
                     error = None
                     consecutive_failures = 0
                 except TimeoutError:
@@ -658,9 +668,9 @@ async def _run_loop(
                     )
                 )
                 if status in {"applied", "fallback"}:
-                    last_decision_simulation_timestamp = observation.simulation_timestamp
+                    last_decision_simulation_timestamp = terminal_observation.simulation_timestamp
                     hold_minutes = _hold_minutes(result)
-                    simulated_action_expiry = observation.simulation_timestamp + timedelta(
+                    simulated_action_expiry = terminal_observation.simulation_timestamp + timedelta(
                         minutes=hold_minutes
                     )
                 if consecutive_failures >= config.maximum_consecutive_decision_failures:
@@ -710,7 +720,7 @@ async def _make_decision(
     *,
     service: SQLiteMCPService,
     agent_host: AgentHost | None,
-) -> tuple[str, bool, dict[str, Any]]:
+) -> tuple[str, bool, dict[str, Any], int]:
     if mode is SimulationMode.AGENT:
         if agent_host is None:
             raise CoordinatorError("agent mode requires an initialized MCP agent host")
@@ -718,9 +728,14 @@ async def _make_decision(
             run_id,
             state_hint=observation.model_dump(mode="json"),
         )
-        return decision.status, decision.status == "fallback", decision.result
+        return (
+            decision.status,
+            decision.status == "fallback",
+            decision.result,
+            decision.observation_id,
+        )
     result = await service.request_safe_fallback(run_id, observation.observation_id)
-    return "fallback", True, result
+    return "fallback", True, result, observation.observation_id
 
 
 async def _recover_with_fallback(

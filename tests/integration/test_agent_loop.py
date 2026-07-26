@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from ecoloop.agent.audit import SQLiteDecisionSink
+from ecoloop.agent.client import MCPClientError
 from ecoloop.agent.loop import AgentHost, AgentHostConfig
 from ecoloop.agent.models import ModelResponse, ToolRequest
 from ecoloop.agent.reliability import ActionCache
@@ -49,6 +50,21 @@ class StateWithoutActionGenerationClient(DirectFakeMCPClient):
         observation = dict(result["observation"])
         observation.pop("action_generation", None)
         return {**result, "observation": observation}
+
+
+class ConstraintsChangedCacheClient(DirectFakeMCPClient):
+    """Reject one cached candidate as invalid under newly active constraints."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.evaluation_rejections = 0
+
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        if name == "evaluate_candidate_actions" and self.evaluation_rejections == 0:
+            self.calls.append((name, arguments))
+            self.evaluation_rejections += 1
+            raise MCPClientError("cached candidate is outside the active constraint envelope")
+        return await super().call_tool(name, arguments)
 
 
 class StagedSchemaModel:
@@ -521,6 +537,52 @@ async def test_cached_action_uses_authoritative_advanced_generation() -> None:
     assert model.call_count == 0
     assert client.service.applied[-1]["action_generation"] == 8
     assert client.calls[-1][1]["action"]["action_generation"] == 8
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_rejected_cached_candidate_becomes_miss_and_uses_fresh_model() -> None:
+    client = ConstraintsChangedCacheClient()
+    state_hint = dict(client.service.state)
+    cache = ActionCache()
+    cache.put(
+        "fake-run",
+        state_hint,
+        {
+            "heating_setpoint_c": 21.0,
+            "cooling_setpoint_c": 25.0,
+            "hold_minutes": 60,
+        },
+    )
+    model = ScriptedModel([valid_tool_sequence()])
+    host = AgentHost(
+        mcp_client=client,
+        model=model,
+        config=AgentHostConfig(enable_action_cache=True),
+        action_cache=cache,
+    )
+
+    decision = await host.decide("fake-run", state_hint=state_hint)
+
+    assert decision.status == "applied"
+    assert decision.cache_hit is False
+    assert model.call_count == 1
+    assert client.evaluation_rejections == 1
+    assert [name for name, _ in client.calls] == [
+        "get_current_building_state",
+        "get_constraints",
+        "evaluate_candidate_actions",
+        "get_current_building_state",
+        "get_constraints",
+        "generate_candidate_actions",
+        "apply_control_action",
+    ]
+    assert decision.trace[2].success is False
+    assert decision.trace[-1].tool_name == "apply_control_action"
+    refreshed = cache.get("fake-run", state_hint)
+    assert refreshed is not None
+    assert refreshed["heating_setpoint_c"] == 20.0
+    assert host.circuit_breaker.failure_count("fake-run") == 0
 
 
 @pytest.mark.integration

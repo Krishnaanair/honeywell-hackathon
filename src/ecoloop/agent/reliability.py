@@ -113,6 +113,12 @@ class ActionCache:
             oldest = min(self._entries, key=lambda item: self._entries[item].created_at)
             self._entries.pop(oldest, None)
 
+    def discard(self, run_id: str, state: dict[str, Any]) -> bool:
+        """Remove the candidate for a quantized state after revalidation fails."""
+
+        key = (run_id, quantized_state_key(state))
+        return self._entries.pop(key, None) is not None
+
 
 def quantized_state_key(state: dict[str, Any]) -> str:
     """Hash decision-relevant state after stable numeric quantization."""

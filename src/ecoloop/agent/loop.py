@@ -531,7 +531,11 @@ class AgentHost:
             name="evaluate_candidate_actions",
             arguments={"run_id": run_id, "candidates": [candidate]},
         )
-        evaluated = await self._call_and_trace(evaluate_request, trace)
+        try:
+            evaluated = await self._call_and_trace(evaluate_request, trace)
+        except MCPClientError:
+            self._cache.discard(run_id, actual_state)
+            return None
         _advance_sequence(sequence, evaluate_request, evaluated)
         sequence.candidate_fingerprints.add(_candidate_fingerprint(candidate))
 

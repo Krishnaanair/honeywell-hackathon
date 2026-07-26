@@ -6,13 +6,15 @@ import asyncio
 import sqlite3
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import ecoloop.coordinator as coordinator_module
+from ecoloop.agent.models import ModelResponse, ToolRequest
 from ecoloop.config import Settings
 from ecoloop.coordinator import CoordinatorConfig, coordinate_simulation, run_case
 from ecoloop.db.store import SQLiteStore
@@ -125,6 +127,117 @@ def _controlled_fake_runner(
     return run
 
 
+class ObservationAdvanceModel(ScriptedModel):
+    """Wait for a newer observation, then target that current MCP state."""
+
+    def __init__(
+        self,
+        decision_started: threading.Event,
+        newer_observation_ready: threading.Event,
+    ) -> None:
+        super().__init__([valid_tool_sequence()])
+        self._decision_started = decision_started
+        self._newer_observation_ready = newer_observation_ready
+
+    async def complete(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        tools: Sequence[Mapping[str, Any]],
+    ) -> ModelResponse:
+        del messages, tools
+        call_number = self.call_count + 1
+        self.call_count = call_number
+        if call_number == 1:
+            self._decision_started.set()
+            ready = await asyncio.to_thread(self._newer_observation_ready.wait, 2.0)
+            if not ready:
+                raise RuntimeError("newer observation was not published during the decision")
+        response = valid_tool_sequence()
+        calls = list(response.tool_calls)
+        calls[-1] = ToolRequest(
+            name="apply_control_action",
+            arguments={
+                "run_id": "fake-run",
+                "observation_id": 2,
+                "action": {
+                    "heating_setpoint_c": 20.0,
+                    "cooling_setpoint_c": 25.0,
+                    "hold_minutes": 60,
+                    "action_generation": call_number,
+                    "reason_code": "COMFORT_PROTECTION",
+                    "explanation": "Use the current observation's bounded candidate.",
+                },
+            },
+        )
+        return response.model_copy(update={"tool_calls": calls})
+
+
+def _runner_advancing_observation_during_decision(
+    decision_started: threading.Event,
+    newer_observation_ready: threading.Event,
+) -> Callable[[SimulationRequest], SimulationResult]:
+    """Publish observation 2 only after observation 1 has triggered a decision."""
+
+    def run(request: SimulationRequest) -> SimulationResult:
+        store = SQLiteStore(request.database_path)
+        store.create_run(
+            request.run_id,
+            RunType.AGENT,
+            is_fake=True,
+            energyplus_version="explicit-test-fake",
+        )
+        store.set_run_status(request.run_id, RunStatus.RUNNING)
+        wall_now = datetime.now(UTC)
+        store.record_observation(
+            observation_input(
+                run_id=request.run_id,
+                timestamp=wall_now,
+                simulation_timestamp=wall_now,
+            )
+        )
+        if not decision_started.wait(2.0):
+            raise RuntimeError("coordinator did not start the first observation decision")
+        second = store.record_observation(
+            observation_input(
+                run_id=request.run_id,
+                timestamp=datetime.now(UTC),
+                simulation_timestamp=wall_now + timedelta(minutes=15),
+                timestep_key="race-step-2",
+                occupied=False,
+                occupancy_count=0.0,
+            )
+        )
+        newer_observation_ready.set()
+
+        deadline = time.monotonic() + 3.0
+        applied_count = 0
+        while time.monotonic() < deadline:
+            applied = store.get_applied_actions(request.run_id)
+            if applied and applied[-1][0].observation_id == second.observation_id:
+                applied_count = len(applied)
+                break
+            time.sleep(0.01)
+        time.sleep(0.3)
+        run_record = store.get_run(request.run_id)
+        if run_record is not None and run_record.status is RunStatus.RUNNING:
+            store.set_run_status(request.run_id, RunStatus.COMPLETED)
+        return SimulationResult(
+            run_id=request.run_id,
+            status="completed",
+            exit_code=0,
+            output_directory=request.output_directory,
+            elapsed_seconds=0.4,
+            progress_percent=100,
+            warning_count=0,
+            severe_count=0,
+            fatal_count=0,
+            observation_count=2,
+            applied_action_count=applied_count,
+        )
+
+    return run
+
+
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_agent_coordinator_runs_threaded_simulation_and_genuine_mcp(
@@ -170,6 +283,56 @@ async def test_agent_coordinator_runs_threaded_simulation_and_genuine_mcp(
     finally:
         connection.close()
     assert decision_count == 1
+
+
+@pytest.mark.integration
+@pytest.mark.asyncio
+async def test_coordinator_marks_newer_terminal_observation_as_decided(
+    tmp_path: Path,
+) -> None:
+    decision_started = threading.Event()
+    newer_observation_ready = threading.Event()
+    model = ObservationAdvanceModel(decision_started, newer_observation_ready)
+    request = _request(tmp_path, SimulationMode.AGENT)
+
+    result = await coordinate_simulation(
+        request,
+        settings=_settings(tmp_path),
+        config=CoordinatorConfig(
+            observation_poll_seconds=0.01,
+            overall_timeout_seconds=6.0,
+            decision_timeout_seconds=3.0,
+            terminal_settle_seconds=0.0,
+        ),
+        runner=_runner_advancing_observation_during_decision(
+            decision_started,
+            newer_observation_ready,
+        ),
+        model_backend=model,
+    )
+
+    assert result.completed
+    assert result.observations_seen == 2
+    assert result.last_observation_id == 2
+    assert len(result.decisions) == 1
+    assert result.decisions[0].observation_id == 1
+    assert model.call_count == 1
+    store = SQLiteStore(request.database_path)
+    applied = store.get_applied_actions(request.run_id)
+    assert len(applied) == 1
+    assert applied[0][0].observation_id == 2
+    connection = sqlite3.connect(store.path)
+    try:
+        durable_observations = [
+            int(row[0])
+            for row in connection.execute(
+                "SELECT observation_id FROM agent_decisions ORDER BY timestamp"
+            )
+        ]
+    finally:
+        connection.close()
+    assert durable_observations == [2]
+    assert store.get_recent_errors(request.run_id) == []
 
 
 @pytest.mark.integration
