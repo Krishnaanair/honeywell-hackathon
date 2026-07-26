@@ -175,7 +175,7 @@ def recent_decisions(database_path: Path, run_id: str, *, limit: int = 50) -> pd
         """
         SELECT timestamp, observation_id, action_generation, model, latency_ms,
                reason_code, explanation, fallback_status,
-               candidate_scores_json, state_summary_json, completed
+               candidate_scores_json, state_summary_json, completed, timeout_count
         FROM agent_decisions
         WHERE run_id = ?
         ORDER BY timestamp DESC
